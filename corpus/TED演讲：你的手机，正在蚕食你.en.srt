@@ -1,0 +1,223 @@
+1
+00:00:12,779 --> 00:00:15,980
+So a few years ago, I heard an interesting rumor.
+
+2
+00:00:16,219 --> 00:00:21,899
+Currently, tly, the head of a large pet food company would go into the annual shareholders meeting with a can of dog food.
+
+3
+00:00:22,320 --> 00:00:24,160
+And he would eat the can of dog food.
+
+4
+00:00:24,480 --> 00:00:28,800
+And this was his way of convincing them that if it was good enough for him, it was good enough for their pets.
+
+5
+00:00:29,339 --> 00:00:36,759
+This strategy is now known as dog fooding, and it's a common strategy in the business world, doesn't mean everyone goes in and eats dog food.
+
+6
+00:00:37,000 --> 00:00:42,240
+But business people will use their own products to demonstrate that they feel that they're confident in them.
+
+7
+00:00:42,619 --> 00:00:54,600
+Now this is a widespread practice, but I think what's really interesting is when you find exceptions to this rule, when you find cases of businesses or people in businesses who don't use their own products, turns out there's one industry where this happens.
+
+8
+00:00:54,840 --> 00:00:59,579
+In a common way, a pretty regular way, and that is the screen based tech industry.
+
+9
+00:00:59,920 --> 00:01:28,079
+So in 2010, Steve Jobs, when he was releasing the iPad, described the iPad as a device that was extraordinary, the best browsing experience you ever had, way better than a laptop, way better than a smartphone. It's an incredible experience. Now, a couple of months later, he was approached by a journalist from the New York Times, and they had a long phone call. And at the end of the call, the journalist threw in a question that seemed like a sort of softball. He said to him, your kids must love the iPad.
+
+10
+00:01:28,500 --> 00:01:32,000
+And there's an obvious answer to this, but what jobs said really staggered.
+
+11
+00:01:32,239 --> 00:01:39,379
+The journalist, he was very surprised because he said they haven't used it. We limit how much technology our kids use at home.
+
+12
+00:01:39,640 --> 00:01:58,400
+This is a very common thing in the tech world. In fact, there's a school at quite near a Silicon Valley called the Waldorf school of the peninsula. And theyonly introduce screens until the eighth grade. Now, what's really interesting about the school is that 75% of the kids who go there have parents who are high level Silicon Valley tech execs.
+
+13
+00:01:59,099 --> 00:02:15,419
+So when I heard about this, I thought it was interesting and surprising, and it pushed me to consider what screens were doing to me, to my family and the people I loved, and to people at large. And so for the last five years, as a professor of business and psychology, I've been studying the effect screens on our lives.
+
+14
+00:02:16,439 --> 00:02:28,159
+And I want to start by just focusing on how much time they take from us, and then we can talk about what that time looks like. So what I'm showing you here is the average 24 hour workday at three different points in history.
+
+15
+00:02:28,400 --> 00:02:34,759
+2007, ten years ago 2015 and then data that I collected actually only last week.
+
+16
+00:02:35,000 --> 00:02:37,659
+And a lot of things haven't changed all that much.
+
+17
+00:02:38,439 --> 00:02:44,879
+So we've sleep roughly seven and a half to eight hours a day. Some people say that's declinslightly, but it hasn't changed much.
+
+18
+00:02:45,120 --> 00:03:00,960
+We work eight and a half to nine hours a day. We engage in survival activities. These are things like eating and bathing and looking after kids about three hours a day. And that leaves this White space. That's our personal time. That space is incredibly important to us.
+
+19
+00:03:01,199 --> 00:03:28,159
+That's the space where we do things that make us individuals. That's where hobbies happen, where we have close relationships, where we really think about our lives, where we get creative, where we zoom back and try to work out whether our lives have been meaningful. And of course, we get some of that from work as well. But when people look back on their lives and they wonder what their lives have been like at the end of their lives, you look at their last things, they say they are talking about those moments that happen in that White personal space. So it's sacred. It's important to us.
+
+20
+00:03:28,419 --> 00:03:38,879
+Now what I'm going to do is show you how much of that space is taken up by screens across time. In 2007, this much, that was the year apple introduced the first iphone.
+
+21
+00:03:39,120 --> 00:03:42,120
+Eight years later, this much.
+
+22
+00:03:43,039 --> 00:03:55,280
+Now this much, that's how much time we spend of that free time in front of our screens. This yellow area, this thin sliver, is where the magic happens. That's where your humanity lives. And right now it's in a very small box.
+
+23
+00:03:55,979 --> 00:04:18,259
+So what do we do about this? Well, the first question is, what does that red space look like? Now, of course, screens are miraculous in a lot of ways. I live in New York, lot of my family lives in Australia, and I have a one year old son. And the way I've been able to introduce them to him is with screens. I couldn't have done that 15 or 20 years ago in quite the same way. So there's a lot of good that comes from them.
+
+24
+00:04:18,500 --> 00:04:40,759
+One thing you can do is you can ask yourself what goes on during that time, how enriching are the apps that we're using? And some are enriching. If you stop people while they're using them and say, tell us, how do you feel right now? They say they feel pretty good about these apps, those that focus on relaxation, exercise, weather, reading, education and health. They spend an average of nine minutes a day on each of these.
+
+25
+00:04:41,019 --> 00:04:43,660
+These apps make them much less happy.
+
+26
+00:04:43,899 --> 00:04:48,939
+About half the people, when you interrupt them and say, how do you feel? Say they don't feel good about using them.
+
+27
+00:04:49,660 --> 00:04:55,600
+Now what's interesting about these dating, social networking, gaming, entertainment, news, web browsing?
+
+28
+00:04:55,839 --> 00:05:03,600
+People spend 27 minutes a day on each of these. We're spending three times longer on the apps that don't make us happy. That doesn't seem very wise.
+
+29
+00:05:04,680 --> 00:05:20,120
+Now, one of the reasons we spend so much time on these apps that make us unhappy is they rob us of stopping cues. Stopping cueues were everywhere in the twentieth century. They were baked into everything we did. A stopping q ue is basically a signal that it's time to move on, to do something new, to do something different.
+
+30
+00:05:20,439 --> 00:05:31,439
+And think about newspapers. Eventually you get to the end, you fold the newspaper away, you put it aside. The same with magazines, books. You get to the end of a chapter prompts you to consider whether you want to continue.
+
+31
+00:05:32,300 --> 00:05:42,819
+You watched a show on tv, eventually the show would end and then youhave a week until the next one came. So they were stopping queues everywhere. But the way we consume media today is such that there are no stopping cueues.
+
+32
+00:05:43,680 --> 00:06:11,000
+The news feed just rolls on and everything's bottomless. Twitter, Facebook, Instagram, email, text messaging, the news. And when you do check all sorts of other sources, you can just keep going on and on and on. So we can get a cue about what to do from western Europe, where they seem to have a number of pretty good ideas in the workplace. Here's one example. This is a Dutch design firm. And what they've done is they've rigged the desks to the ceiling.
+
+33
+00:06:11,240 --> 00:06:16,439
+And at 6:00p.m.every day, it doesn't matter who you're emailing or what you're doing, the desks rise to the ceiling.
+
+34
+00:06:19,199 --> 00:06:20,860
+Four days a week.
+
+35
+00:06:21,220 --> 00:06:38,180
+The space turns into a yoga studio one day a week, into a dance club. It's really up to you which ones you stick around for. But this is a great stopping rule because it means that at the end of the day, everything stops. There's no way to work at diimler, the German car company. They've got another great strategy when you go on vacation.
+
+36
+00:06:38,420 --> 00:06:44,839
+Instead of saying this person's on vacation, theyget back to you. Eventually they say, this person's on vacation, so we've deleted your email.
+
+37
+00:06:45,540 --> 00:06:48,339
+This person will never see the email you just sent.
+
+38
+00:06:49,279 --> 00:06:51,579
+You can email back in a couple of weeks.
+
+39
+00:06:51,899 --> 00:06:53,779
+Or you can email someone else.
+
+40
+00:06:54,319 --> 00:06:55,399
+And so.
+
+41
+00:07:00,660 --> 00:07:08,699
+You can imagine what that's like. You go on vacation and you're actually on vacation. The people who work at this company feel that they actually get a break from work.
+
+42
+00:07:09,199 --> 00:07:14,519
+But of course, that doesn't tell us much about what we should do at home in our own lives. And so I want to make some suggestions.
+
+43
+00:07:14,879 --> 00:07:30,040
+It's easy to say between, say, 56 pm, I'm going to not use my phone. The problem is, 56 pm looks different on different days. I think a far better strategy is to say I do certain things every day. There are certain occasions that happen every day, like eating dinner.
+
+44
+00:07:30,439 --> 00:07:39,779
+Sometimes I'll be alone, sometimes with other people, sometimes in a restaurant, sometimes at home. But the rule that I've adopted is I will never use my phone at the table.
+
+45
+00:07:40,019 --> 00:07:50,879
+It's far away, as far away as possible, because we're really bad at resisting temptation. But when you have a stopping queue that every time dinner begins, my phone goes far away, you avoid temptation altogether.
+
+46
+00:07:51,120 --> 00:07:54,860
+At first it hurts. I had massive fomo.
+
+47
+00:07:55,220 --> 00:07:56,939
+I struggled.
+
+48
+00:07:57,199 --> 00:08:10,399
+But what happens is you get used to it. You overcome the withdrawal the same way you would from a drug. And what happens is life becomes more colorful, richer, more interesting, you have better conversations. You really connect with the people who are there with you.
+
+49
+00:08:10,920 --> 00:08:22,300
+I think it's a fantastic strategy, and we know it works because when people do this, and I've tracked a whole lot of people who have tried this, it expands. They feel so good about it that they start doing it for the first hour of the day, in the morning.
+
+50
+00:08:22,740 --> 00:08:26,199
+They start putting their phones on airplane mode on the weekend.
+
+51
+00:08:26,519 --> 00:08:30,120
+That way, your phone remains a camera, but it's no longer a phone.
+
+52
+00:08:30,360 --> 00:08:34,779
+It's a really powerful idea, and we know people feel much better about their lives when they do this.
+
+53
+00:08:35,700 --> 00:08:45,240
+So what's the take home here? You know, screens are miraculous. I've already said that, and I feel that it's but the way we use them is a lot like driving down a really fast long road.
+
+54
+00:08:45,679 --> 00:08:52,259
+And you're in a car where the accelerator is mashed to the floor, it's kind of hard to reach the brake pedal, and you've got a choice.
+
+55
+00:08:53,259 --> 00:09:08,580
+You can either glide by past, say, the beautiful ocean scenes and take snaps out the window, and that's the easy thing to do, or you can go out of your way to move the car to the side of the road to push that brake pedal to get out, take off your shoes and socks.
+
+56
+00:09:08,820 --> 00:09:25,399
+Take a couple of steps onto the sand, feel what the sound feels like under your feet, walk to the ocean and let the ocean lap at your ankles. Your life will be richer and more meaningful because you breathe in that experience and because you've left your phone in the car. Thank you.

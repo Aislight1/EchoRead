@@ -1,0 +1,31 @@
+# 用户数据与密钥 —— 绝对不要提交
+config.json
+vocab.json
+practice.json
+voices.json
+define_cache.json
+plan.json
+cache/
+downloads/
+
+# 构建产物
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# 二进制下载器（用户自行下载，见 README）
+yt-dlp.exe
+cloudflared.exe
+
+# 开发调试脚本
+_tools/
+
+# 系统杂项
+Thumbs.db
+.DS_Store
+_legacy_muse/
+dist/
+build/
+*.spec

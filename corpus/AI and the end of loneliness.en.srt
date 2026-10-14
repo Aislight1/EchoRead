@@ -1,0 +1,555 @@
+1
+00:00:03,957 --> 00:00:07,322
+I have a couple of questions for you—but they’re personal.
+
+2
+00:00:07,342 --> 00:00:09,567
+So I’m not going to ask for a show of hands.
+
+3
+00:00:09,697 --> 00:00:15,287
+First, right now, at this stage of your life, are you lonely?
+
+4
+00:00:15,977 --> 00:00:19,067
+And if not, have you ever been lonely?
+
+5
+00:00:19,497 --> 00:00:25,467
+My favorite description of loneliness comes from Zoë Heller's book 'Notes on a Scandal.'
+
+6
+00:00:25,557 --> 00:00:34,103
+And in it, the narrator, who is played in the movie by Judi Dench, distinguishes between passing loneliness and something deeper.
+
+7
+00:00:34,123 --> 00:00:38,434
+So she observes that people think they know what it's like to be lonely.
+
+8
+00:00:38,454 --> 00:00:42,521
+You know, they had a bad breakup or a rough time in summer camp.
+
+9
+00:00:42,541 --> 00:00:43,827
+But then she says this.
+
+10
+00:00:44,237 --> 00:00:48,382
+About the drip, drip of long-haul, no-end-in-sight solitude, they know nothing.
+
+11
+00:00:48,402 --> 00:01:00,181
+They don't know what it is to construct an entire weekend around a visit to the launderette, or to sit in a darkened flat on Halloween night, because you can't bear to expose your bleak evening to a crowd of jeering trick-or-treaters.
+
+12
+00:01:01,197 --> 00:01:12,692
+And she concludes with this: 'I have sat on park benches and trains and school room chairs feeling the great store of unused, objectless love sitting in my belly like a stone until I was sure I would cry out and fall,
+
+13
+00:01:12,712 --> 00:01:14,067
+flailing to the ground.'
+
+14
+00:01:14,297 --> 00:01:16,811
+I like this quote for a few reasons.
+
+15
+00:01:16,831 --> 00:01:23,067
+It talks about solitude, and solitude is a big source of loneliness, but it also talks about love.
+
+16
+00:01:23,087 --> 00:01:29,643
+You could be with somebody, but if you're not loved, not needed, not respected, you might feel lonely.
+
+17
+00:01:29,663 --> 00:01:31,327
+And then there's understanding.
+
+18
+00:01:31,417 --> 00:01:38,953
+Suppose you have something in your head that's important to you, That matters a lot to you, but you feel others don't get it, or don't care to get it, or aren't trying hard enough to get it.
+
+19
+00:01:40,599 --> 00:01:42,147
+This too could cause loneliness.
+
+20
+00:01:42,237 --> 00:01:45,337
+Loneliness ravages the body as well as the soul.
+
+21
+00:01:45,357 --> 00:01:49,019
+A report by the Surgeon General associates it with greater risk of cardiovascular disease, dementia, stroke and the like.
+
+22
+00:01:49,039 --> 00:01:53,944
+It's the equivalent of smoking 15 cigarettes a day.
+
+23
+00:01:57,197 --> 00:02:07,248
+Studies in the United States and United Kingdom find that about one in five people describe themselves as often or always lonely.
+
+24
+00:02:07,268 --> 00:02:10,527
+And the most at-risk group is young adults.
+
+25
+00:02:12,157 --> 00:02:17,507
+I'm here to talk about a possible cure for loneliness and what it might mean.
+
+26
+00:02:17,957 --> 00:02:21,407
+And I think we could see loneliness as similar to boredom.
+
+27
+00:02:21,637 --> 00:02:26,460
+I'm old enough to remember when people were bored all the time.
+
+28
+00:02:26,480 --> 00:02:28,946
+Long train rides, long car rides, long plane rides.
+
+29
+00:02:28,966 --> 00:02:34,767
+Late at night when the TV stations switched off and you were all alone, and you had to read.
+
+30
+00:02:36,917 --> 00:02:46,759
+(Laughter) But now most of us carry around our phones and those phones offer podcasts and movies and books and music and social media and so on.
+
+31
+00:02:46,779 --> 00:02:51,167
+And so for many of us, boredom is a thing of the past.
+
+32
+00:02:51,417 --> 00:02:56,787
+Well the cure for loneliness may also be found in our phones and our laptops.
+
+33
+00:02:56,807 --> 00:02:59,427
+And it is, of course, generative AI.
+
+34
+00:02:59,517 --> 00:03:04,784
+Last year, some friends and I wrote an article called 'In Praise of Empathic AI.'
+
+35
+00:03:04,804 --> 00:03:08,942
+If that title makes you cringe and makes you kind of angry, you're not alone.
+
+36
+00:03:08,962 --> 00:03:10,315
+Our colleagues hated it.
+
+37
+00:03:10,503 --> 00:03:13,367
+It's the article that I've written that most people hated.
+
+38
+00:03:13,937 --> 00:03:14,967
+But bear with me.
+
+39
+00:03:14,987 --> 00:03:28,502
+We started by making a sort of simple point, which is to review a set of studies that have involved — like, you get a whole lot of people interacting with other people, sometimes doctors, sometimes therapists, sometimes just regular people.
+
+40
+00:03:28,522 --> 00:03:31,907
+And you get a whole lot of people interacting with chatbots.
+
+41
+00:03:32,057 --> 00:03:35,855
+And then you ask them later: “How did it go?
+
+42
+00:03:35,875 --> 00:03:37,000
+What’s your experience?”
+
+43
+00:03:37,020 --> 00:03:42,950
+And people tend to rate the chatbots as more empathic, more caring, more understanding.
+
+44
+00:03:42,970 --> 00:03:44,387
+And it's no surprise.
+
+45
+00:03:44,918 --> 00:03:48,604
+AIs are built to be attentive, to be present, to be interested.
+
+46
+00:03:48,705 --> 00:03:51,693
+An AI is never going to impatiently wait for you to finish telling your story, so it can tell you one of its own.
+
+47
+00:03:51,713 --> 00:03:57,364
+(Laughter) An AI is never going to say, 'Dude, I'm busy.
+
+48
+00:03:57,384 --> 00:03:58,355
+Get back to me later.
+
+49
+00:03:58,375 --> 00:03:59,367
+I got things going on.'
+
+50
+00:04:01,061 --> 00:04:09,948
+Suppose some future — I don't think it's happening now, but some future AI could serve as a cure for loneliness.
+
+51
+00:04:09,968 --> 00:04:11,399
+Would this be a good thing?
+
+52
+00:04:11,419 --> 00:04:13,279
+Well to some extent, yes.
+
+53
+00:04:13,299 --> 00:04:15,011
+Obviously, yes.
+
+54
+00:04:15,921 --> 00:04:27,701
+Think about the many millions of elderly people, many in institutions, who go for days and nights without talking to anybody, in perfect agony of isolation.
+
+55
+00:04:27,721 --> 00:04:29,325
+Many of them have dementia.
+
+56
+00:04:29,345 --> 00:04:33,376
+Many of them are difficult to interact with for other reasons.
+
+57
+00:04:33,396 --> 00:04:36,895
+They don't have family and friends to spend time with them.
+
+58
+00:04:36,915 --> 00:04:43,392
+And there's not enough money in the world to pay people to come and talk to them for hours on end.
+
+59
+00:04:43,412 --> 00:04:50,991
+If some future version of ChatGPT or Claude or Gemini could ease these people's suffering, it would be a godsend.
+
+60
+00:04:51,781 --> 00:04:54,894
+But for the rest of us, it's more complicated.
+
+61
+00:04:54,914 --> 00:05:00,046
+And you can view these cures for loneliness as akin to a powerful painkiller.
+
+62
+00:05:00,066 --> 00:05:04,115
+Like a powerful painkiller, it can alleviate suffering.
+
+63
+00:05:04,135 --> 00:05:09,291
+But like a powerful painkiller, it can sometimes come at a terrible cost.
+
+64
+00:05:09,381 --> 00:05:14,365
+And to make sense of the cost, you have to think about what loneliness is for.
+
+65
+00:05:14,385 --> 00:05:24,371
+So the neuroscientist John Cacioppo, who founded the modern science of loneliness, argued that it's a biological signal akin to hunger, thirst and pain.
+
+66
+00:05:24,641 --> 00:05:27,189
+And as such, it does two things for us.
+
+67
+00:05:27,209 --> 00:05:34,933
+It could sometimes be paralyzing, but when it works out well, it has certain evolved functions that improve our lives.
+
+68
+00:05:34,953 --> 00:05:45,291
+So one, just as hunger motivates us to seek out food, loneliness and other forms of social suffering motivate us to seek out and maintain social connection.
+
+69
+00:05:45,381 --> 00:05:53,934
+Because we get lonely, we accept an invitation to a party, we invite a friend out to brunch, we open up the dating apps.
+
+70
+00:05:53,954 --> 00:05:56,407
+It also helps us regulate relationships.
+
+71
+00:05:56,427 --> 00:06:06,591
+It helps us try to repair a relationship that has gone wrong, to apologize for messing up, and to try to show genuine interest in our relationship with someone else.
+
+72
+00:06:06,961 --> 00:06:11,471
+A second thing that loneliness does is help us grow as people.
+
+73
+00:06:11,821 --> 00:06:16,831
+It's a truism in psychology that we learn from failure.
+
+74
+00:06:17,818 --> 00:06:22,031
+They call it trial-and-error learning—or reinforcement learning.
+
+75
+00:06:22,121 --> 00:06:28,798
+The idea is nicely summed up in the movie 'Batman Begins', where young Bruce Wayne’s father asks the future Batman, 'Why do we fall?'
+
+76
+00:06:28,818 --> 00:06:32,856
+And he answers, 'So we can learn to pick ourselves up.'
+
+77
+00:06:34,566 --> 00:06:41,388
+This is literally true for toddlers who learn to walk by falling and stumbling and doing things wrong.
+
+78
+00:06:41,408 --> 00:06:48,079
+It's true for a comedian who learns to improve her act by bombing on stage, by having her jokes fall flat.
+
+79
+00:06:48,099 --> 00:06:53,991
+It's true for a boxer who learns to evade a punch by getting repeatedly smacked in the face.
+
+80
+00:06:54,081 --> 00:06:58,500
+Well, failure in the social realm is associated with loneliness.
+
+81
+00:06:58,520 --> 00:07:04,151
+And can you imagine what it would be like if people never got the signal of failure?
+
+82
+00:07:04,361 --> 00:07:13,271
+Imagine a teenage boy who never learned to cut short his monologues because his AI companion never got bored.
+
+83
+00:07:15,121 --> 00:07:21,191
+(Laughter) Imagine an adult who never learned to apologize because her AI companion never needed an apology.
+
+84
+00:07:21,481 --> 00:07:26,089
+Imagine a world where the answer to the question, 'Am I the asshole?'
+
+85
+00:07:26,109 --> 00:07:27,097
+(Laughter and Applause) Now you might think this has an easy technological fix.
+
+86
+00:07:27,117 --> 00:07:30,011
+is always a firm and resounding no.
+
+87
+00:07:36,720 --> 00:07:44,062
+You could just go into the settings and make it less sycophantic.
+
+88
+00:07:44,262 --> 00:07:50,051
+And in fact, I don't use AI myself for social purposes, but I use it a lot for my work.
+
+89
+00:07:50,181 --> 00:07:53,470
+And after a while I got tired of Chat.
+
+90
+00:07:53,490 --> 00:07:54,951
+And Claude just said, 'Oh, brilliant question, Paul.
+
+91
+00:07:54,971 --> 00:07:56,654
+How do you get to be so intelligent?'
+
+92
+00:07:56,674 --> 00:07:58,451
+Oh, oh, such a clever idea.
+
+93
+00:07:59,529 --> 00:08:04,708
+So I went into the settings and said, 'Stop.
+
+94
+00:08:04,728 --> 00:08:06,032
+Do not praise me.
+
+95
+00:08:06,052 --> 00:08:06,563
+Be blunt.
+
+96
+00:08:06,583 --> 00:08:07,622
+Just be honest.
+
+97
+00:08:07,642 --> 00:08:09,232
+Tell it like it is.'
+
+98
+00:08:09,252 --> 00:08:10,103
+(Laughter and Applause) I kind of missed it. (Laughter) You can call this Cordelia's Problem.
+
+99
+00:08:10,123 --> 00:08:12,553
+Then a month later, I changed it back.
+
+100
+00:08:25,303 --> 00:08:32,902
+In Shakespeare's 'King Lear,' the king brings together his three daughters to decide how to divide the kingdom.
+
+101
+00:08:32,922 --> 00:08:36,313
+He asks each daughter to declare how much she loves him.
+
+102
+00:08:36,603 --> 00:08:39,400
+The first two daughters lavish praise on him.
+
+103
+00:08:39,420 --> 00:08:40,859
+They claim to love him infinitely.
+
+104
+00:08:40,879 --> 00:08:42,315
+He is the center of their lives.
+
+105
+00:08:42,335 --> 00:08:43,449
+Then Cordelia steps forward.
+
+106
+00:08:43,469 --> 00:08:49,048
+and says, 'I love you as a daughter should love her father, no more, no less.'
+
+107
+00:08:49,068 --> 00:08:53,333
+The king, enraged, banishes her from the kingdom.
+
+108
+00:08:53,803 --> 00:08:55,933
+Now, 'King Lear' is a tragedy.
+
+109
+00:08:56,023 --> 00:09:00,953
+His two sycophantic daughters did not love him at all and ultimately betray him.
+
+110
+00:09:01,123 --> 00:09:05,437
+Now some of you are probably thinking, 'Well, I'm not like King Lear.
+
+111
+00:09:05,457 --> 00:09:06,553
+I welcome pushback.
+
+112
+00:09:06,573 --> 00:09:09,573
+I don't want that kind of flattery.
+
+113
+00:09:09,593 --> 00:09:10,177
+And maybe—maybe.
+
+114
+00:09:10,197 --> 00:09:16,307
+But I suspect some of us prefer the performance of pushback to pushback itself.
+
+115
+00:09:16,327 --> 00:09:22,473
+So yes, constant affirmation — 'Yes, you're wonderful' — becomes cloying.
+
+116
+00:09:22,603 --> 00:09:25,609
+But a well-calibrated AI won't do that.
+
+117
+00:09:26,081 --> 00:09:29,482
+It will resist, argue with you, and push back.
+
+118
+00:09:29,502 --> 00:09:33,637
+And then finally, in a very satisfying way, it'll say, "I guess you win."
+
+119
+00:09:33,657 --> 00:09:35,716
+You've totally persuaded me.
+
+120
+00:09:35,736 --> 00:09:46,733
+And I worry that this sort of intelligent and titrated sycophancy is more corrosive to the soul than a sort of sucking-up yes-men AIs we deal with now.
+
+121
+00:09:46,883 --> 00:09:49,813
+For some of you, the solution will be clear.
+
+122
+00:09:49,903 --> 00:09:56,039
+Treat these hypersocial AIs like the powerful painkillers they are.
+
+123
+00:09:56,059 --> 00:10:04,073
+Make them available to the people who need them the most and forbid their use for the rest of us.
+
+124
+00:10:04,343 --> 00:10:07,723
+But this is not the solution that I believe in.
+
+125
+00:10:07,743 --> 00:10:10,989
+I'm not a catastrophist when it comes to AI.
+
+126
+00:10:11,009 --> 00:10:19,696
+Just like there are people who deal with AI companions in a normal way and benefit from it, and it doesn’t harm their life.
+
+127
+00:10:19,984 --> 00:10:37,733
+In the same way there are people who resist technological temptations more generally, people who, when faced with the unholy trinity of TikTok, Pornhub and Wordle, nonetheless — (Laughter) — go to the gym, meet with friends, touch grass.
+
+128
+00:10:40,023 --> 00:10:45,533
+The second reason I don't want to ban these things is more personal.
+
+129
+00:10:46,503 --> 00:10:49,513
+When I was 11, my mother died of cancer.
+
+130
+00:10:50,489 --> 00:11:00,673
+I then entered a period of great pain and then problems with social relationships and then a period of loneliness that lasted for years.
+
+131
+00:11:01,183 --> 00:11:12,993
+I would have benefited so much from someone, or find something, that would listen to me, that would express interest, that I could talk to, that I could share my feelings with.
+
+132
+00:11:13,103 --> 00:11:21,633
+It seems like a betrayal of my past self to say, 'Tough it out—do without, suffer and learn from your suffering.'
+
+133
+00:11:22,323 --> 00:11:34,616
+I wonder if the best of all possible worlds is to create imperfect companions, companions that somehow alleviate the pain of loneliness without destroying our humanity.
+
+134
+00:11:34,636 --> 00:11:40,697
+Companions that are difficult enough to deal with that we learn from interacting with them.
+
+135
+00:11:40,717 --> 00:11:48,033
+Companions that are sufficiently imperfect that we ultimately abandon them to deal with people.
+
+136
+00:11:48,203 --> 00:11:49,219
+Now I'm pretty confident we could build such things.
+
+137
+00:11:49,239 --> 00:11:53,042
+I'm less confident that there's money to be had by doing so.
+
+138
+00:11:56,605 --> 00:12:07,275
+I accept that it might be a bad business model to create AIs that users ultimately outgrow, but I hope there are people who care enough to do it anyway.
+
+139
+00:12:07,365 --> 00:12:08,415
+Thank you. (Applause)
