@@ -1,0 +1,12 @@
+# 听与读 EchoRead v1.0.0 —— 源码运行依赖（Python 3.10+）
+# 打包发布版（dist）无需安装任何依赖。
+pywebview>=5.0
+pythonnet>=3.0
+clr-loader>=0.2
+dashscope>=1.20
+openai>=1.30
+edge-tts>=6.1
+fast-langdetect>=0.2
+sounddevice>=0.4
+json-repair>=0.30
+requests>=2.31
