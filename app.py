@@ -236,6 +236,7 @@ class Api:
         self.vocab = analysis.Vocab(self.vocab_file)
         self._rec = speech_asr.Recorder(log=self._plog)
         self._plogs = []
+        self._clean_legacy_voices()
         self._recording = False
         # ---- 统一语音引擎 + 单词词典缓存 ----
         self.app_dir = tl.APP_DIR
@@ -421,14 +422,50 @@ class Api:
             pass
 
     def _custom_voices(self):
-        """读自定义 / 设计 / 克隆出来的音色。"""
+        """读练习页自定义音色。
+
+        音色工作台下线后，voices.json 里可能还躺着 design_/clone_ 两类旧条目：
+        它们对应的接口已经不存在，读的时候就丢掉，别让它们再出现在下拉里。
+        """
         try:
             if self.voice_file.exists():
                 d = json.loads(self.voice_file.read_text(encoding='utf-8'))
-                return d if isinstance(d, list) else []
+                if not isinstance(d, list):
+                    return []
+                return [x for x in d if isinstance(x, dict)
+                        and str(x.get('kind') or '').lower() not in ('design', 'clone')
+                        and not str(x.get('id') or '').startswith(('design_', 'clone_'))]
         except Exception:
             pass
         return []
+
+    def _clean_legacy_voices(self):
+        """清掉 voices.json 里已下线能力（design_/clone_）的残留条目。
+
+        音色工作台整卡删除后，这两类条目没有任何入口能删，也不会被合成使用，
+        留着只会让旧配置看起来"还有音色"。只删这两类，练习页自定义风格（custom_）保留。
+        改动前先原样备份成 voices.json.bak-<时间戳>；任何异常都不影响启动。
+        """
+        try:
+            if not self.voice_file.exists():
+                return
+            items = json.loads(self.voice_file.read_text(encoding='utf-8'))
+            if not isinstance(items, list):
+                return
+            dead = [x for x in items if isinstance(x, dict) and (
+                str(x.get('kind') or '').lower() in ('design', 'clone')
+                or str(x.get('id') or '').startswith(('design_', 'clone_')))]
+            if not dead:
+                return
+            bak = self.voice_file.with_name(
+                'voices.json.bak-' + datetime.now().strftime('%Y%m%d-%H%M%S'))
+            bak.write_bytes(self.voice_file.read_bytes())
+            dead_ids = {id(x) for x in dead}
+            keep = [x for x in items if id(x) not in dead_ids]
+            store.write_json(self.voice_file, keep)
+            self._plog(f'清理 voices.json：移除 {len(dead)} 个已下线的设计/克隆音色（备份 {bak.name}）')
+        except Exception:
+            pass
 
     def _services(self):
         """按当前配置构造服务对象。
@@ -869,16 +906,9 @@ class Api:
         cfg = tl.load_config()
         tts, asr, llm = self._services()
         rec_ok, rec_msg = speech_asr.Recorder.available()
+        # list_presets() 已经带了「练习页自定义风格」（extra_presets，构造 TTS 时传入），
+        # 这里绝不能再拼一次 voices.json——否则每个自定义音色都会在下拉里出现两遍。
         presets = tts.list_presets()
-        # 用户自定义/克隆的音色。音色工作台已下线（#9），voices.json 里残留的
-        # design_/clone_ 条目不再对应任何可用音色，静默过滤；只留练习页自定义风格。
-        try:
-            custom = json.loads(self.voice_file.read_text(encoding='utf-8')) if self.voice_file.exists() else []
-        except Exception:
-            custom = []
-        custom = [c for c in custom
-                  if not str(c.get('id') or '').startswith(('design_', 'clone_'))]
-        presets = presets + custom
         # 麦克风默认设备在服务端给一次，前端不必每次自己回落（#7 换句跳回默认设备的根因之一）
         try:
             mic_dev = int(cfg.get('micDevice')) if str(cfg.get('micDevice') or '').strip() else None
@@ -950,22 +980,9 @@ class Api:
         store.write_json(self.voice_file, items)
         return {'ok': True, 'id': vid}
 
-    # ---------- 音色设计 / 克隆：已下线（#9 音色工作台整卡删除）
-    # MiMo v2.5 起 voicedesign / voiceclone 被折叠进主模型，旧 UI 只能手填指令、
-    # 失败率高且没有可用的音色校验；speech_tts 侧已改为「已下线」stub。
-    # 这里保留同名入口只为「旧前端/旧配置调用时不至于报 is not a function」，
-    # 一律返回明确原因，不再有任何副作用。
-    def tts_design_voice(self, name, instruct):
-        return {'ok': False, 'msg': '音色设计已下线：请在「语音输出」里选内置音色'}
-
-    def tts_clone_voice(self, name, ref_audio, instruct=''):
-        return {'ok': False, 'msg': '音色克隆已下线：请在「语音输出」里选内置音色'}
-
-    def pick_audio(self):
-        return {'ok': False, 'msg': '音色克隆已下线，不再需要选参考音频'}
-
-    def clone_refs(self):
-        return {'ok': False, 'msg': '音色克隆已下线', 'refs': []}
+    # ---------- 音色设计 / 克隆：UI 与后端入口均已删除（#9 音色工作台整卡删除）
+    # MiMo V2.5 起 voicedesign / voiceclone 下线，语音合成只用内置音色；
+    # 旧 voices.json 的 design_/clone_ 条目由 _custom_voices() 过滤并在启动时清理。
 
     def remove_custom_voice(self, vid):
         """删自定义风格音色（练习页「自定义风格」仍在用，保留）。"""

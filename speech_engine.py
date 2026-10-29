@@ -330,14 +330,16 @@ class SpeechEngine:
         text = sents.get(lang) or sents["en"]
 
         vid = voice_id or ""
-        # 缓存键必须带「实际生效的模型」：只按引擎+音色缓存，切模型/换 Key 后还会命中旧音频
-        # （用户报「音节设置怎么改都是老声音」的隐藏原因之一）
+        # 缓存键必须带「实际生效的模型 + 真实音色 + 语速」：只按引擎+音色缓存，
+        # 切模型/换全局音色/改 edgeRate 后还会命中旧音频（「怎么改都是老声音」的隐藏原因）。
         try:
             import speech_providers as _spv
             _m = (self.cfg.get("ttsEngineModels") or {}).get(eid) or _spv.tts_default_model(eid)
         except Exception:
             _m = ""
-        key = f"{eid}|{_m}|{vid}|{lang}|{speed}|{text}"
+        _gv = (self.cfg.get("dashscopeVoice") or "") if eid == "dashscope" else ""
+        _er = (self.cfg.get("edgeRate") or "") if eid == "edge" else ""
+        key = f"{eid}|{_m}|{vid}|{lang}|{speed}|{_gv}|{_er}|{text}"
         import hashlib
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
         cached = (self.cache_dir or Path(".")) / f"preview_{h}.wav"

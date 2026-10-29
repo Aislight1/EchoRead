@@ -29,6 +29,37 @@ def _no_window():
     return getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
+def _normalize_wav(data):
+    """把流式 WAV 的占位长度改回真实大小。
+
+    DashScope SSE 会把音频分块下发，第一块的 RIFF/data 长度常是 0x7FFFFFFF 占位，
+    拼完后没人回填 —— 播放器能容忍，但 Python wave 会把 0.3 秒读成 12 小时，
+    时长统计/切片全跟着错（真机合成验证时抓到）。只改长度字段，不动音频数据。
+    """
+    try:
+        if len(data) < 44 or data[:4] != b'RIFF' or data[8:12] != b'WAVE':
+            return data
+        pos = 12
+        while pos + 8 <= len(data):
+            cid = data[pos:pos + 4]
+            csz = int.from_bytes(data[pos + 4:pos + 8], 'little')
+            body = pos + 8
+            if cid == b'data':
+                real = len(data) - body
+                if csz != real:
+                    data = data[:pos + 4] + real.to_bytes(4, 'little') + data[pos + 8:]
+                break
+            if csz == 0x7FFFFFFF or csz > len(data) - body:
+                break
+            pos = body + csz + (csz & 1)
+        real_riff = len(data) - 8
+        if int.from_bytes(data[4:8], 'little') != real_riff:
+            data = data[:4] + real_riff.to_bytes(4, 'little') + data[8:]
+        return data
+    except Exception:
+        return data
+
+
 # ---------------------------------------------------------------- 内置音色
 # 每个预设 = 一段「风格指令」，MiMo 用它控制语气/音色/语速。
 VOICE_PRESETS = [
@@ -384,6 +415,7 @@ class TTS:
             if _spv:
                 raise RuntimeError(_spv.err_hint(model, str(e), 'tts')) from None
             raise
+        data = _normalize_wav(data)
         cdir.mkdir(parents=True, exist_ok=True)
         out.write_bytes(data)
         self._say(f'合成完成：{out.name}（{len(data) / 1024:.0f} KB）')
@@ -430,7 +462,10 @@ class TTS:
         if _vnote:
             self._say(_vnote)
         instruct = (preset.get('instruct') or '').strip()
-        body = (f'{instruct}\n{text}') if instruct else text
+        # 风格指令**不能**拼进正文：qwen3-tts 会把整段 text 念出来，
+        # 「Neutral, clear narration…」曾被当成句子先朗读一遍（真机 ASR 验证抓到）。
+        # 要控制语气就传 input.instructions（qwen3）或 input.instruction（cosyvoice）。
+        body = text
         # 官方上限：600 字符（qwen3-tts）；tts-next（Audiogen 系）3000
         limit = 3000 if ('qwen-audio' in m or 'cosyvoice' in m) and 'next' in m else 600
         if len(body) > limit:
@@ -463,9 +498,11 @@ class TTS:
             # 默认 qwen3-tts 系（multimodal 口；-realtime 后缀系是 Realtime API 另协议，未接）
             endpoint = '/api/v1/services/aigc/multimodal-generation/generation'
             ascii_ratio = sum(1 for c in body if ord(c) < 128) / max(1, len(body))
-            payload = {'model': model,
-                       'input': {'text': body, 'voice': v,
-                                 'language_type': 'English' if ascii_ratio > 0.5 else 'Chinese'},
+            inp = {'text': body, 'voice': v,
+                   'language_type': 'English' if ascii_ratio > 0.5 else 'Chinese'}
+            if instruct:
+                inp['instructions'] = instruct[:200]   # 独立字段：不念出来，只影响语气
+            payload = {'model': model, 'input': inp,
                        'parameters': {'text_type': 'PlainText'}}
         url = host + endpoint
         self._say(f'阿里云合成中…（{model} / {v} · {fam}系专用口）')
@@ -488,7 +525,7 @@ class TTS:
                     ctype = (resp.headers.get('Content-Type') or '')
                     if 'event-stream' not in ctype:
                         return _json.loads(resp.read().decode('utf-8')), None
-                    b64, last, err_code = '', None, ''
+                    parts, last, err_code = [], None, ''
                     for raw in resp:
                         line = raw.decode('utf-8', 'replace').strip()
                         if not line.startswith('data:'):
@@ -500,9 +537,17 @@ class TTS:
                         last = chunk
                         if chunk.get('code'):
                             err_code = f"{chunk.get('code')} {chunk.get('message', '')}"
-                        b64 += ((chunk.get('output') or {}).get('audio') or {}).get('data') or ''
-                    if b64:
-                        return {'_b64': b64}, None
+                        # 每一块的 data 都是**独立 base64**（各自带填充），
+                        # 必须逐块解码再拼字节；拼字符串再解一次会在第一块末尾
+                        # 的 '=' 处截断——真机验证时 2.7 秒语音只剩 0.32 秒。
+                        _d = ((chunk.get('output') or {}).get('audio') or {}).get('data') or ''
+                        if _d:
+                            try:
+                                parts.append(_b64.b64decode(_d))
+                            except Exception:
+                                pass
+                    if parts:
+                        return {'_bytes': b''.join(parts)}, None
                     if err_code:
                         return None, err_code
                     return (last or {}), None
@@ -528,8 +573,8 @@ class TTS:
             raise RuntimeError(f'阿里云合成失败（{err}）')
         if res.get('code'):                       # 业务错误（整读 JSON 的 HTTP 200 但 code 非空）
             raise RuntimeError(f"阿里云合成失败：{res.get('code')} {res.get('message', '')}")
-        if res.get('_b64'):                        # SSE 攒的音频
-            return _b64.b64decode(res['_b64'])
+        if res.get('_bytes'):                      # SSE 逐块解码后攒的音频
+            return res['_bytes']
         audio = ((res.get('output') or {}).get('audio')) or {}
         a_url = audio.get('url') or ''
         a_data = audio.get('data') or ''
