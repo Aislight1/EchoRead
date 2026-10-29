@@ -14,6 +14,10 @@ dist/
 *.spec
 __pycache__/
 *.pyc
+# 打包时临时挪走的用户数据（含 config.json 密钥），绝不能进版本库
+.build_stash/
+.build_stash_prev/
+_bak_release_*/
 
 # 二进制下载器（用户自行下载，见 README）
 yt-dlp.exe
@@ -26,7 +30,3 @@ _tools/
 Thumbs.db
 .DS_Store
 _legacy_muse/
-dist/
-build/
-*.spec
-installer_out/
