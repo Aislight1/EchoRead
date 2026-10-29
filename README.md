@@ -62,7 +62,7 @@ python app.py
 | ⏱ 时间轴定稿（每句话在第几秒） | paraformer 词级对齐（阿里云） | ✅ 配置 Key 后自动调用 |
 | 🔍 转写质检（抽听防漏转） | qwen3.8-omni-flash | ✅ 配置 Key 后自动调用 |
 | 💬 对话纠错（释义 / 讲解 / 翻译 / 总结） | 你配置的 LLM（推荐 qwen-plus） | ✅ 配置 Key 后自动调用 |
-| 🔊 语音合成（示范朗读） | 音色工作台可选（阿里云 / Edge / MiMo） | ✅ 按需配置后自动调用 |
+| 🔊 语音合成（示范朗读） | 音色工作台可选（阿里云 qwen3-tts-flash / Edge / MiMo） | ✅ 按需配置后自动调用 |
 
 > 识别与转写走阿里云 DashScope；LLM 可选任意 OpenAI 兼容端点。首次使用建议先跑「❓ 帮助」页的环境体检。这些环节消耗的 API 额度为你自己的账户额度，由应用自动调用。
 
@@ -72,7 +72,7 @@ python app.py
 |---|---|---|
 | 阿里云百炼 | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/?apiKey=1#/api-key) | 识别 / 转写 / LLM / TTS（推荐，一个 Key 通吃） |
 | 硅基流动 | [cloud.siliconflow.cn](https://cloud.siliconflow.cn/account/ak) | LLM 备选 |
-| 小米 MiMo | [xiaomimimo.com](https://www.xiaomimimo.com/) | TTS / ASR 备选 |
+| 小米 MiMo | [xiaomimimo.com](https://www.xiaomimimo.com/) | TTS / ASR 备选（V2.5 系列已于 2026-10-21 下线，需手填新版模型名） |
 
 > 在「设置」页粘贴对应 Key 即可启用。各平台计费与配额以官网为准。
 
