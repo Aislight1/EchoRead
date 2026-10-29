@@ -263,7 +263,9 @@ def main():
                 h.update(rel.encode('utf-8'))
                 h.update(p.read_bytes())
         stamp = f'{datetime.now().strftime("%Y-%m-%d %H:%M")} · {h.hexdigest()[:8]}'
-        info = {'builtAt': stamp, 'stamp': stamp, 'source': str(APP), 'exe': f'{NAME}.exe'}
+        # source 只写目录名，不写绝对路径——release/dist 会被打进安装包，
+        # 绝对路径会带出本机用户名/项目目录（发布隐私红线）
+        info = {'builtAt': stamp, 'stamp': stamp, 'source': APP.name, 'exe': f'{NAME}.exe'}
         blob = json.dumps(info, ensure_ascii=False, indent=1)
         (out / 'build_info.json').write_text(blob, encoding='utf-8')
         (out / '_internal').mkdir(parents=True, exist_ok=True)
