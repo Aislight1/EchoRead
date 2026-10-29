@@ -12,6 +12,8 @@
 实测量（本机 CPU，2026-10）：前向 ≈3.9x 实时（37min 音频 ≈14min，一次性），
 对齐 DP 本身 0.1s/百句量级；模型首载 2.4s（缓存后），首次下载约 1.2GB。
 """
+import hashlib
+import json
 import re
 import subprocess
 import tempfile
@@ -20,6 +22,9 @@ from pathlib import Path
 
 _MODEL = None          # (model, tokenizer, aligner, sample_rate) 进程内单例
 _AVAIL = None          # None=未测 / True / False
+
+# 窗级缓存版本：改了切窗口径 / 归一化口径 / 单位换算就 +1，旧缓存自动失效
+_CACHE_VER = 'fa1'
 
 
 def prewarm():
@@ -122,7 +127,63 @@ def _cut_wav(ffmpeg, audio, s, e, out_wav):
     return r.returncode == 0 and out_wav.exists()
 
 
-def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None):
+# ---------------- 窗级结果缓存（H-04：语句修正重复跑别把整个音频再算一遍） ----------------
+# 缓存粒度 = 一个对齐窗。键 = 音频身份 + 窗绝对区间 + 窗内归一化词序列。
+# 只要这三样没变，MMS_FA 前向的结果必然相同（纯函数），可以整段跳过切音频+前向+DP。
+# 改句子的效果：只有含该句的窗失效，其余窗秒回——这才是「修一句不该等 15-30 秒」的正解。
+
+def _win_key(audio, ws, we, wlist):
+    h = hashlib.sha1()
+    h.update(_CACHE_VER.encode('utf-8'))
+    try:
+        st = Path(audio).stat()
+        h.update(f'|{Path(audio).name}|{st.st_size}|{int(st.st_mtime)}'.encode('utf-8'))
+    except Exception:
+        h.update(f'|{audio}'.encode('utf-8'))
+    h.update(f'|{ws:.3f}|{we:.3f}|'.encode('utf-8'))
+    h.update(' '.join(wlist).encode('utf-8'))
+    return h.hexdigest()[:20]
+
+
+def _win_load(cache_dir, key):
+    """返回 [(s0, e0, score), ...]，未命中/损坏返回 None。"""
+    try:
+        p = Path(cache_dir) / 'fa' / f'w_{key}.json'
+        if not p.exists():
+            return None
+        d = json.loads(p.read_text(encoding='utf-8'))
+        if d.get('v') != _CACHE_VER:
+            return None
+        t = d.get('t') or []
+        if not t:
+            return None
+        return [(float(a), float(b), float(c)) for a, b, c in t]
+    except Exception:
+        return None
+
+
+def _win_save(cache_dir, key, triples):
+    try:
+        d = Path(cache_dir) / 'fa'
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f'w_{key}.json'
+        tmp = p.with_suffix('.tmp')
+        # 存全精度：二次四舍五入会让冷/热两路在第 3 位上分叉（0.1235→0.123 vs 0.124）
+        tmp.write_text(json.dumps({'v': _CACHE_VER,
+                                   't': [[float(a), float(b), float(c)]
+                                         for a, b, c in triples]}), encoding='utf-8')
+        tmp.replace(p)
+        files = sorted(d.glob('w_*.json'), key=lambda x: x.stat().st_mtime)
+        if len(files) > 800:               # 上限：超 800 个窗清最旧 300 个
+            for f in files[:300]:
+                f.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+
+def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None,
+               cache_dir=None):
     """定稿 cues + 原音频 → 全量词级对齐。
 
     返回 (new_cues, stats, words)：
@@ -131,6 +192,7 @@ def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None):
       words     [{'w','s','e','i'}]  i=句号（卡拉OK sidecar 直接可写）
     取消：pause_wait 返回真时抛 RuntimeError('已取消')。
     progress(done_wins, total_wins, phase_text)
+    cache_dir 给了就按窗缓存前向结果（H-04），未变的窗秒回；不给则每次全算。
     """
     import torch
 
@@ -147,7 +209,7 @@ def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None):
     tmpdir = Path(tempfile.mkdtemp(prefix='ted_fa_'))
     out = [dict(c) for c in cues]
     words = []
-    aligned = kept = 0
+    aligned = kept = cache_hits = 0
     cue_scores = {}                        # {句号: [词score,...]}（音文连贯性门用）
     try:
         for wi, idxs in enumerate(wins):
@@ -155,20 +217,8 @@ def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None):
                 raise RuntimeError('已取消')
             ws = max(0.0, float(cues[idxs[0]]['start']) - 0.2)
             we = float(cues[idxs[-1]]['end']) + 0.2
-            wav = tmpdir / f'w{wi:03d}.wav'
-            if not _cut_wav(ffmpeg, audio, ws, we, wav):
-                raise RuntimeError(f'切窗 {wi} 失败（ffmpeg）')
-            data, sr_w = _sf.read(str(wav), dtype='float32')
-            if sr_w != sr:
-                import torchaudio
-                data = torchaudio.functional.resample(
-                    torch.from_numpy(data).unsqueeze(0), sr_w, sr)[0].numpy()
-            wave = torch.from_numpy(data).unsqueeze(0)
-            with torch.inference_mode():
-                emission, _ = model(wave)          # (1, frames, cls)
-            ratio = wave.size(1) / emission.size(1)
 
-            # 窗内词展开（句归属记录）
+            # 窗内词展开（句归属记录）——先算词再决定要不要前向：缓存键要用它
             wlist, owner = [], []
             for i in idxs:
                 ws_i = norm_words(cues[i]['text'])
@@ -179,19 +229,50 @@ def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None):
                 if progress:
                     progress(wi + 1, len(wins), '')
                 continue
-            toks = tokenizer(wlist)                 # List[List[int]] per word
-            spans = aligner(emission[0], toks)      # List[List[TokenSpan]] per word
+
+            # H-04：先查窗级缓存。命中就完全跳过切音频 + 前向 + CTC DP。
+            wkey = _win_key(audio, ws, we, wlist) if cache_dir else None
+            trip = _win_load(cache_dir, wkey) if wkey else None
+            if trip is not None and len(trip) != len(wlist):
+                trip = None                         # 词数对不上=损坏/口径变了，重算
+            if trip is None:
+                wav = tmpdir / f'w{wi:03d}.wav'
+                if not _cut_wav(ffmpeg, audio, ws, we, wav):
+                    raise RuntimeError(f'切窗 {wi} 失败（ffmpeg）')
+                data, sr_w = _sf.read(str(wav), dtype='float32')
+                if sr_w != sr:
+                    import torchaudio
+                    data = torchaudio.functional.resample(
+                        torch.from_numpy(data).unsqueeze(0), sr_w, sr)[0].numpy()
+                wave = torch.from_numpy(data).unsqueeze(0)
+                with torch.inference_mode():
+                    emission, _ = model(wave)      # (1, frames, cls)
+                ratio = wave.size(1) / emission.size(1)
+
+                toks = tokenizer(wlist)             # List[List[int]] per word
+                spans = aligner(emission[0], toks)  # List[List[TokenSpan]] per word
+                trip = []
+                for k in range(len(wlist)):
+                    if not spans[k]:
+                        trip.append((-1.0, -1.0, -1.0))   # 该词无 span（对齐不上）
+                        continue
+                    s0 = spans[k][0].start * ratio / sr + ws
+                    e0 = spans[k][-1].end * ratio / sr + ws
+                    # 词 score = 该词各 token 的 CTC 平均概率：真说了的词 0.84-0.99，
+                    # 音频里不存在的词（交错重复/多余文本）≈0.00（Bob .bak 实测）
+                    wsc = sum(float(sp.score) for sp in spans[k]) / max(1, len(spans[k]))
+                    trip.append((s0, e0, wsc))
+                if wkey:
+                    _win_save(cache_dir, wkey, trip)
+            else:
+                cache_hits += 1
 
             by_sent = {}
             for k, gi in enumerate(owner):
-                if not spans[k]:
+                s0, e0, wsc = trip[k]
+                if s0 < 0:
                     continue
-                s0 = spans[k][0].start * ratio / sr + ws
-                e0 = spans[k][-1].end * ratio / sr + ws
                 by_sent.setdefault(gi, []).append((s0, e0))
-                # 词 score = 该词各 token 的 CTC 平均概率：真说了的词 0.84-0.99，
-                # 音频里不存在的词（交错重复/多余文本）≈0.00（Bob .bak 实测）
-                wsc = sum(float(sp.score) for sp in spans[k]) / max(1, len(spans[k]))
                 cue_scores.setdefault(gi, []).append(wsc)
                 words.append({'w': wlist[k], 's': round(s0, 3), 'e': round(e0, 3),
                               'i': gi, 'sc': round(wsc, 3)})
@@ -224,8 +305,10 @@ def align_cues(audio, cues, ffmpeg, log=None, pause_wait=None, progress=None):
         per_cue.append({'total': len(ss), 'matched': len(ss) if ok else hi,
                         'shift_ms': 0, 'score': round(sum(ss) / len(ss), 3)})
     stats = {'total': len(cues), 'aligned': aligned, 'kept': kept,
-             'windows': len(wins), 'secs': secs, 'per_cue': per_cue}
+             'windows': len(wins), 'secs': secs, 'per_cue': per_cue,
+             'cacheHits': cache_hits}
     if log:
+        _ch = f'，{cache_hits} 窗命中缓存跳过前向' if cache_hits else ''
         log(f'本地对齐完成：{aligned}/{len(cues)} 句锚定词级时间戳'
-            f'（{kept} 句无可对齐词保留原时间，{secs:.0f}s）')
+            f'（{kept} 句无可对齐词保留原时间，{secs:.0f}s{_ch}）')
     return out, stats, words

@@ -6,11 +6,14 @@
 pywebview + WebView2 原生窗口。
 语料管理、下载、跟读播放器全部本地完成；
 发音练习用到三个外部能力（可在设置里各自配置，也都能留空不用）：
-    · 语音合成 MiMo-V2.5-TTS（小米，OpenAI 兼容协议）
+    · 语音合成 阿里云 Qwen3-TTS（默认）/ Edge TTS（无需 Key）/ MiMo（V2.5 已下线）
     · 语音识别 阿里云 DashScope paraformer（返回逐词时间戳）
     · 对话纠错 任意 OpenAI 兼容 LLM
 """
+import hashlib
 import json
+import math
+import re
 import sys
 import subprocess
 import threading
@@ -24,6 +27,7 @@ sys.path.insert(0, str(APP_DIR))
 
 import tedlibrarian as tl  # noqa: E402
 import videosrc            # noqa: E402
+import videokind           # noqa: E402  ⑤ 来源类型（演讲/对话/读书/播客）
 import plan as planmod     # noqa: E402
 import localfs             # noqa: E402
 import speech_tts          # noqa: E402
@@ -61,6 +65,49 @@ def _audio_sib(audio_path, suffix):
     """
     p = Path(audio_path)
     return p.parent / (p.stem + suffix)
+
+
+def _llm_json_cached(cache_dir, pv, model_name, sys_p, user, stat=None, llm=None):
+    """LLM 批次结果的磁盘缓存（P3/H-04）。
+
+    键 = 提示词版本 + 模型名 + system + user（整批句子都在 user 里），
+    同一批文本没变就秒回，不再烧一次模型调用。失败/非 dict 不写缓存。
+    stat 传 dict 时累加 {'hit','miss'}，供调用方报告命中批数。
+    llm 必须由调用方注入（客户端是 doctor run() 里的局部变量，不是模块级名字）。
+    """
+    key = hashlib.sha1(
+        f'{pv}|{model_name or ""}|{sys_p}|{user}'.encode('utf-8')
+    ).hexdigest()[:24]
+    d = Path(cache_dir) / 'llm'
+    p = d / f'c_{key}.json'
+    try:
+        if p.exists():
+            obj = json.loads(p.read_text(encoding='utf-8'))
+            if isinstance(obj, dict) and obj.get('v') == pv:
+                if stat is not None:
+                    stat['hit'] = stat.get('hit', 0) + 1
+                return obj.get('data')
+    except Exception:
+        pass
+    if llm is None:
+        raise RuntimeError('LLM 客户端未就绪')
+    data = llm.chat_json(sys_p, user, max_tokens=4000, tag='字幕诊断')
+    try:
+        if isinstance(data, dict):
+            d.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix('.tmp')
+            tmp.write_text(json.dumps({'v': pv, 'data': data}, ensure_ascii=False),
+                           encoding='utf-8')
+            tmp.replace(p)
+            fs = sorted(d.glob('c_*.json'), key=lambda x: x.stat().st_mtime)
+            if len(fs) > 800:                  # 上限：超 800 条清最旧 300 条
+                for f in fs[:300]:
+                    f.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if stat is not None:
+        stat['miss'] = stat.get('miss', 0) + 1
+    return data
 
 
 def _find_browser(name):
@@ -171,6 +218,7 @@ class Api:
         self._dl = {'running': False, 'log': [], 'done': False, 'error': '', 'result': None}
         self._lock = threading.Lock()
         self._migrate_gsv_config()
+        self._migrate_retired_tts()
         # 主线程预热本地对齐引擎：torch 的 OpenMP 初始化必须发生在主线程，
         # doctor 后台线程里首次 import 会段错误（没装 torch 静默跳过，<10ms）
         try:
@@ -201,21 +249,30 @@ class Api:
     # ---------------- 配置读写（设置页用）
     def settings(self):
         cfg = tl.load_config()
+        bi = self.app_build()
         return {
             'ok': True,
+            'buildStamp': bi.get('stamp') or '',
+            'buildAt': bi.get('builtAt') or '',
             'libraryDir': cfg.get('libraryDir', ''),
             'extraDirs': cfg.get('extraDirs', []),
             'openAfter': bool(cfg.get('openFolderAfterDownload')),
-            'ttsProvider': cfg.get('ttsProvider') or 'mimo',
+            'ttsProvider': cfg.get('ttsProvider') or 'dashscope',
             'mimoApiKey': cfg.get('mimoApiKey') or '',
             'mimoBaseUrl': cfg.get('mimoBaseUrl') or 'https://api.xiaomimimo.com/v1',
-            'mimoTtsModel': cfg.get('mimoTtsModel') or 'mimo-v2.5-tts',
+            # MiMo V2.5 已于 2026-10-21 下线：不再默认返回死模型名，空就是空（前端提示手填 v2.6）
+            'mimoTtsModel': cfg.get('mimoTtsModel') or '',
             'mimoVoice': cfg.get('mimoVoice') or 'Chloe',
             'dashscopeApiKey': cfg.get('dashscopeApiKey') or '',
             'asrModel': cfg.get('asrModel') or 'paraformer-realtime-v2',
+            # ⑥：白名单里能存 asrMode、但读回来时漏了这一项 → 前端每次进设置页
+            # 拿到 undefined 就回落成 traditional 并原样写回，用户切「分片并行」
+            # 永远存不住（这就是"改了没生效"的一半原因）。
+            'asrMode': cfg.get('asrMode') or 'traditional',
             'asrProvider': cfg.get('asrProvider') or 'dashscope',
             'audioModel': cfg.get('audioModel') or '',
-            'mimoAsrModel': cfg.get('mimoAsrModel') or 'mimo-v2.5-asr',
+            'micDevice': cfg.get('micDevice'),          # None/未设＝跟系统默认；数字＝锁定的输入设备（#7）
+            'mimoAsrModel': cfg.get('mimoAsrModel') or '',
             'llmBaseUrl': cfg.get('llmBaseUrl') or '',
             'llmApiKey': cfg.get('llmApiKey') or '',
             'llmModel': cfg.get('llmModel') or '',
@@ -242,6 +299,7 @@ class Api:
                 'ttsProvider', 'mimoApiKey', 'mimoBaseUrl', 'mimoTtsModel', 'mimoVoice',
                 'dashscopeApiKey', 'asrModel', 'llmBaseUrl', 'llmApiKey', 'llmModel',
                 'ttsPreset', 'asrProvider', 'mimoAsrModel', 'asrMode', 'audioModel', 'asrAlign',
+                'micDevice',                                # 录音输入设备（#7：换句子不再掉回默认设备）
                 'llmBatchWorkers', 'asrAlignWorkers',
                 'customProviders', 'speechProviders', 'volcApiKey', 'siliconflowApiKey',
                 'dashscopeBaseUrl', 'dashscopeVoice',
@@ -262,21 +320,47 @@ class Api:
         except Exception as e:
             return {'ok': False, 'msg': str(e)}
 
+    def app_build(self):
+        """构建指纹：让「我现在跑的是哪次构建」一眼可见。
+        用户这次报的很多现象其实是跑了旧 dist（exe 10/15、源码 10/17 已修），
+        有这行字就不必再靠猜。#6/#1 排查的第一步永远是先看这里。"""
+        info = {'builtAt': '', 'stamp': '', 'source': '',
+                'frozen': bool(getattr(sys, 'frozen', False))}
+        for p in (self.app_dir / 'build_info.json', self.app_dir / '_internal' / 'build_info.json'):
+            try:
+                if p.exists():
+                    d = json.loads(p.read_text(encoding='utf-8')) or {}
+                    for k in ('builtAt', 'stamp', 'source'):
+                        if d.get(k):
+                            info[k] = str(d.get(k))
+                    break
+            except Exception:
+                continue
+        if not info['stamp']:
+            info['stamp'] = '源码运行（未打包）'
+            try:  # 源码运行时用 app.py 的修改时间当指纹：任何“改了没生效”的误会一眼可查
+                info['source'] = datetime.fromtimestamp(
+                    (APP_DIR / 'app.py').stat().st_mtime).strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                pass
+        return {'ok': True, **info}
+
     # ================= 练习：基础 =================
     def _migrate_gsv_config(self):
         """GSV 移除（终稿 P0）：启动时清洗配置残留——ttsEngine/ttsEngineOverride
-        里的 'local' 改 mimo，gsvDir/gsvConfig/gsvExtraDirs/localRefEnabled 死键删除。"""
+        里的 'local' 改当前可用引擎（阿里云优先，其次 Edge），死键删除。"""
         try:
             cfg = self.cfg
             dirty = False
+            fb = speech_engine.preferred_engine(cfg)
             if str(cfg.get('ttsEngine') or '') == 'local':
-                cfg['ttsEngine'] = 'mimo'
+                cfg['ttsEngine'] = fb
                 dirty = True
             ov = cfg.get('ttsEngineOverride')
             if isinstance(ov, dict):
                 for k, v in list(ov.items()):
                     if str(v) == 'local':
-                        ov[k] = 'mimo'
+                        ov[k] = fb
                         dirty = True
             for k in ('gsvDir', 'gsvConfig', 'gsvExtraDirs', 'localRefEnabled'):
                 if k in cfg:
@@ -285,7 +369,54 @@ class Api:
             if dirty:
                 tl.save_config(cfg)
                 self.cfg = cfg
-                self._plog('已清理 GPT-SoVITS 旧配置（该功能已移除，引擎自动切回 MiMo）')
+                self._plog(f'已清理 GPT-SoVITS 旧配置（该功能已移除，引擎自动切到 {fb}）')
+        except Exception:
+            pass
+
+    def _migrate_retired_tts(self):
+        """MiMo V2.5 下线（2026-10-21）：把指向死模型的配置迁到可用引擎。
+
+        · ttsEngine/ttsProvider 是 mimo，且模型为空或落在 MIMO_RETIRED_MODELS
+          → 切到 preferred_engine（有百炼 Key 用 dashscope，否则 Edge）；
+        · 切到 dashscope 时补 ttsEngineModels.dashscope = qwen3-tts-flash；
+        · ttsEngineOverride 里指向死 mimo 的场景一并改；
+        · 旧的 mimoTtsModel 字段原样保留（只作历史参考，不再参与合成）——
+          用户若已手填 v2.6 模型，mimo 视为可用，不迁移。
+        """
+        try:
+            import speech_providers as _spv
+            cfg = self.cfg
+            retired = {str(x).lower() for x in getattr(_spv, 'MIMO_RETIRED_MODELS', set())}
+
+            def _dead_mimo(v):
+                if str(v or '').lower() != 'mimo':
+                    return False
+                mo = (((cfg.get('ttsEngineModels') or {}).get('mimo')
+                       or cfg.get('mimoTtsModel') or '')).strip().lower()
+                return (not mo) or mo in retired
+
+            fb = speech_engine.preferred_engine(cfg)
+            dirty = False
+            if _dead_mimo(cfg.get('ttsEngine')) or _dead_mimo(cfg.get('ttsProvider')):
+                cfg['ttsEngine'] = fb
+                cfg['ttsProvider'] = fb
+                dirty = True
+            ov = cfg.get('ttsEngineOverride')
+            if isinstance(ov, dict):
+                for k, v in list(ov.items()):
+                    if _dead_mimo(v):
+                        ov[k] = fb
+                        dirty = True
+            if fb == 'dashscope':
+                models = dict(cfg.get('ttsEngineModels') or {})
+                if not (models.get('dashscope') or '').strip():
+                    models['dashscope'] = 'qwen3-tts-flash'
+                    cfg['ttsEngineModels'] = models
+                    dirty = True
+            if dirty:
+                tl.save_config(cfg)
+                self.cfg = cfg
+                self._plog(f'MiMo V2.5 已下线：语音输出已切到 {fb}（原 MiMo 配置保留作参考）')
         except Exception:
             pass
 
@@ -398,7 +529,7 @@ class Api:
             return {'ok': False, 'msg': str(e)[:200]}
 
     def _engine(self, tts=None):
-        """统一语音引擎（MiMo / 本地 / Edge）。"""
+        """统一语音引擎（阿里云 Qwen TTS / Edge / 其它供应商）。"""
         if tts is None:
             tts, _a, _l = self._services()
         if self._engine_obj is None:
@@ -438,12 +569,45 @@ class Api:
                     e['model'] = self.cfg.get('mimoTtsModel') or ''
                 else:
                     e['model'] = models.get(eid) or ''
+                e['modelSaved'] = bool(e['model'])   # 是否用户显式存过（没存过只是默认值，别当覆盖写回）
+                # 空值不该让前端「当前模型」显示空白：补该供应商的默认最新模型
+                if not e['model']:
+                    try:
+                        e['model'] = _spv.tts_default_model(eid)
+                    except Exception:
+                        e['model'] = ''
+                # 音色目录由供应商注册表单源给出（跨系音色会被 Engine411 拒），
+                # 前端据此只列当前模型系的音色
+                try:
+                    e['voiceList'] = _spv.tts_voices(eid, e['model'] or None)
+                    e['families'] = list((e.get('voices') or {}).keys())
+                    e['defaultModel'] = _spv.tts_default_model(eid)
+                except Exception:
+                    e['voiceList'], e['families'], e['defaultModel'] = [], [], ''
                 has = bool(kn and (self.cfg.get(kn) or '').strip())
                 if not has:
                     uc = (self.cfg.get('speechProviders') or {}).get(eid) or {}
                     has = bool((uc.get('apiKey') or '').strip())
                 e['hasKey'] = has
+                # MiMo V2.5 下线标记：引擎卡直接显示「已下线」，不让用户再误选死模型
+                try:
+                    import speech_providers as _spv2
+                    _ret = {str(x).lower() for x in getattr(_spv2, 'MIMO_RETIRED_MODELS', set())}
+                    _res = (e['model'] or '').lower()
+                    e['retired'] = bool(eid == 'mimo' and ((not _res) or _res in _ret))
+                    e['retiredNote'] = getattr(_spv2, 'MIMO_RETIRED_NOTE', '') if e['retired'] else ''
+                except Exception:
+                    e['retired'], e['retiredNote'] = False, ''
             ov['ok'] = True
+            # 语音输出的持久字段：前端别再从 window._HUB_* 猜，统一从后端取
+            ov['dashscopeVoice'] = self.cfg.get('dashscopeVoice') or ''
+            ov['dashscopeBaseUrl'] = self.cfg.get('dashscopeBaseUrl') or ''
+            ov['ttsEngineModels'] = dict(models)
+            try:
+                import speech_providers as _spv2
+                ov['scenes'] = list(getattr(_spv2, 'TTS_SCENES', []) or [])
+            except Exception:
+                ov['scenes'] = []
             return ov
         except Exception as e:
             return {'ok': False, 'msg': str(e)[:200]}
@@ -543,23 +707,42 @@ class Api:
             return {'ok': False, 'msg': str(e)[:150]}
 
     def speech_set_engine(self, engine, scene=''):
-        """设引擎。scene 为空 = 全局默认；非空 = 只覆写那个场景。"""
+        """设引擎。scene 为空 = 全局默认；非空 = 只覆写那个场景。
+
+        engine 传空串 = **清除**该场景的覆盖（回落到全局引擎）——之前清不掉，
+        场景被覆写后只能改不能删，属于「音节设置怎么改都不对」的一部分。"""
         try:
-            if engine not in speech_engine.ENGINES:
-                return {'ok': False, 'msg': f'未知引擎：{engine}'}
             cfg = tl.load_config()
             if scene:
                 ov = dict(cfg.get('ttsEngineOverride') or {})
+                if not engine:
+                    ov.pop(scene, None)
+                    cfg['ttsEngineOverride'] = ov
+                    tl.save_config(cfg)
+                    self._engine_obj = None
+                    self._plog(f'语音引擎：{scene} 场景覆盖已清除（回落全局）')
+                    return {'ok': True, 'engine': '', 'scene': scene, 'cleared': True}
+                if engine not in speech_engine.ENGINES:
+                    return {'ok': False, 'msg': f'未知引擎：{engine}'}
                 ov[scene] = engine
                 cfg['ttsEngineOverride'] = ov
             else:
+                if engine not in speech_engine.ENGINES:
+                    return {'ok': False, 'msg': f'未知引擎：{engine}'}
                 cfg['ttsEngine'] = engine
                 cfg['ttsProvider'] = engine        # 引擎=供应商：直连 TTS 层的调用（tts_speak 等）跟着走
             tl.save_config(cfg)
             self._engine_obj = None            # 让下次重建
             self._plog(f"语音引擎 → {speech_engine.ENGINES[engine]['name']}"
                        + (f"（仅 {scene}）" if scene else "（全局）"))
-            return {'ok': True, 'engine': engine, 'scene': scene}
+            warn = ''
+            if engine == 'mimo' and not speech_engine._mimo_usable(cfg):
+                try:
+                    import speech_providers as _spv
+                    warn = getattr(_spv, 'MIMO_RETIRED_NOTE', '')
+                except Exception:
+                    warn = 'MiMo V2.5 已下线，请填新模型名（如 mimo-v2.6-tts）'
+            return {'ok': True, 'engine': engine, 'scene': scene, 'warn': warn}
         except Exception as e:
             return {'ok': False, 'msg': str(e)[:200]}
 
@@ -687,24 +870,57 @@ class Api:
         tts, asr, llm = self._services()
         rec_ok, rec_msg = speech_asr.Recorder.available()
         presets = tts.list_presets()
-        # 用户自定义/克隆的音色
+        # 用户自定义/克隆的音色。音色工作台已下线（#9），voices.json 里残留的
+        # design_/clone_ 条目不再对应任何可用音色，静默过滤；只留练习页自定义风格。
         try:
             custom = json.loads(self.voice_file.read_text(encoding='utf-8')) if self.voice_file.exists() else []
         except Exception:
             custom = []
+        custom = [c for c in custom
+                  if not str(c.get('id') or '').startswith(('design_', 'clone_'))]
         presets = presets + custom
+        # 麦克风默认设备在服务端给一次，前端不必每次自己回落（#7 换句跳回默认设备的根因之一）
+        try:
+            mic_dev = int(cfg.get('micDevice')) if str(cfg.get('micDevice') or '').strip() else None
+        except (TypeError, ValueError):
+            mic_dev = None
+        # 当前引擎必须是「真的会用」的那个：MiMo V2.5 下线后不能继续报 mimo，
+        # Key/模型也要按该供应商查（曾经恒查 mimoApiKey + mimo 模型 → 状态假显示）。
+        try:
+            eng = speech_engine.current_engine(cfg)
+        except Exception:
+            eng = 'dashscope'
+        try:
+            import speech_providers as _spv
+            _model = ((cfg.get('ttsEngineModels') or {}).get(eng)
+                      or (cfg.get('mimoTtsModel') if eng == 'mimo' else '')
+                      or _spv.tts_default_model(eng))
+        except Exception:
+            _model = ''
+        _kn = (speech_engine.ENGINES.get(eng) or {}).get('needsKey')
+        _has = (not _kn) or bool((cfg.get(_kn) or '').strip()) or bool(
+            ((cfg.get('speechProviders') or {}).get(eng) or {}).get('apiKey'))
         return {
             'ok': True,
             'tts': {
-                'provider': cfg.get('ttsProvider') or 'mimo',
-                'hasKey': bool((cfg.get('mimoApiKey') or '').strip()),
-                'model': cfg.get('mimoTtsModel') or 'mimo-v2.5-tts',
-                'voice': cfg.get('mimoVoice') or 'Chloe',
+                'provider': cfg.get('ttsProvider') or eng,
+                'hasKey': _has,
+                'model': _model,
+                'voice': ((cfg.get('dashscopeVoice') if eng == 'dashscope'
+                           else cfg.get('mimoVoice')) or ''),
+                'engine': eng,
+                'engineOverride': dict(cfg.get('ttsEngineOverride') or {}),
             },
             'asr': {
                 'hasKey': bool((cfg.get('dashscopeApiKey') or '').strip()),
-                'model': cfg.get('asrModel') or 'paraformer-realtime-v2',
+                # 别再谎报：字段为空时返回空串，前端 svcBar 显示「未设置」而不是假装在跑
+                # paraformer-realtime-v2（用户切模型后这里不刷新就是 ⑥ 的根因）
+                'model': cfg.get('asrModel') or '',
+                'provider': cfg.get('asrProvider') or 'dashscope',
+                'audioModel': cfg.get('audioModel') or '',
+                'mode': cfg.get('asrMode') or 'traditional',
             },
+            'micDevice': mic_dev,
             'llm': {
                 'ready': llm.ready,
                 'baseUrl': cfg.get('llmBaseUrl') or '',
@@ -734,120 +950,25 @@ class Api:
         store.write_json(self.voice_file, items)
         return {'ok': True, 'id': vid}
 
-    # ---------- 音色设计 / 克隆（MiMo 高级能力）
+    # ---------- 音色设计 / 克隆：已下线（#9 音色工作台整卡删除）
+    # MiMo v2.5 起 voicedesign / voiceclone 被折叠进主模型，旧 UI 只能手填指令、
+    # 失败率高且没有可用的音色校验；speech_tts 侧已改为「已下线」stub。
+    # 这里保留同名入口只为「旧前端/旧配置调用时不至于报 is not a function」，
+    # 一律返回明确原因，不再有任何副作用。
     def tts_design_voice(self, name, instruct):
-        """用文字描述设计一个音色，返回试听音频 + voiceId。"""
-        try:
-            tts, _a, _l = self._services()
-            r = tts.design_voice(name, instruct)
-            item = {'id': 'design_' + str(int(time.time())), 'name': name,
-                    'desc': (instruct or '')[:80], 'voice': r.get('voiceId') or '',
-                    'voiceId': r.get('voiceId') or '', 'kind': 'design',
-                    'group': '我的音色', 'instruct': instruct,
-                    'model': 'mimo-v2.5-tts-voicedesign'}
-            self._save_voice(item)
-            self._refresh_roots()
-            return {'ok': True, 'voiceId': item['voiceId'], 'url': self._url(r['file']), 'item': item}
-        except Exception as e:
-            return {'ok': False, 'msg': str(e)}
+        return {'ok': False, 'msg': '音色设计已下线：请在「语音输出」里选内置音色'}
 
     def tts_clone_voice(self, name, ref_audio, instruct=''):
-        """用一段参考音频克隆音色。ref_audio 传本地路径。"""
-        try:
-            tts, _a, _l = self._services()
-            r = tts.clone_voice(name, ref_audio, instruct or None)
-            item = {'id': 'clone_' + str(int(time.time())), 'name': name,
-                    'desc': ('克隆自 ' + Path(ref_audio).name)[:80],
-                    'voice': r.get('voiceId') or '', 'voiceId': r.get('voiceId') or '',
-                    'kind': 'clone', 'group': '我的音色',
-                    'instruct': instruct or 'A natural, clear voice.',
-                    'refAudio': r.get('refAudio') or '',
-                    'model': 'mimo-v2.5-tts-voiceclone'}
-            self._save_voice(item)
-            self._refresh_roots()
-            return {'ok': True, 'voiceId': item['voiceId'], 'url': self._url(r['file']), 'item': item}
-        except Exception as e:
-            return {'ok': False, 'msg': str(e)}
-
-    def _save_voice(self, item):
-        items = self._custom_voices()
-        items.append(item)
-        store.write_json(self.voice_file, items)
+        return {'ok': False, 'msg': '音色克隆已下线：请在「语音输出」里选内置音色'}
 
     def pick_audio(self):
-        """选一个音频文件（给音色克隆用）。"""
-        try:
-            res = webview.windows[0].create_file_dialog(
-                webview.OPEN_DIALOG, allow_multiple=False,
-                file_types=('音频 (*.wav;*.mp3;*.m4a)', '所有文件 (*.*)'))
-            if res:
-                return {'ok': True, 'path': res[0] if isinstance(res, (list, tuple)) else res}
-            return {'ok': False, 'msg': '未选择'}
-        except Exception as e:
-            return {'ok': False, 'msg': str(e)}
+        return {'ok': False, 'msg': '音色克隆已下线，不再需要选参考音频'}
 
-    # ---------- 克隆用的候选参考音频
     def clone_refs(self):
-        """列出本机已切好的、适合当克隆参考的音频。
-
-        这样就不用让人手输路径 —— 之前那些手工切好的片段直接选。
-        """
-        out = []
-        import wave as _wv
-
-        def info(p, label, note):
-            try:
-                with _wv.open(str(p)) as w:
-                    dur = w.getnframes() / w.getframerate()
-                    sr = w.getframerate()
-                    ch = w.getnchannels()
-            except Exception:
-                return None
-            return {'path': str(p), 'name': Path(p).stem, 'label': label, 'note': note,
-                    'dur': round(dur, 2), 'sr': sr, 'ch': ch,
-                    'ok': 2.0 <= dur <= 30.0,
-                    'url': self._url(str(p))}
-
-        # 1) 缓存的克隆参考/（持久化的那些）
-        vd = self.cache_dir / "voices"
-        if vd.exists():
-            for p in sorted(vd.glob("ref_*.wav")):
-                r = info(p, "已保存的克隆参考", "")
-                if r:
-                    out.append(r)
-
-        # 3) 专门为英语练习切好的英文参考音频（config.enRefDir，可选）
-        try:
-            en_dir = Path(self.cfg.get('enRefDir') or '')
-            texts = {}
-            idx = en_dir / "index.json"
-            if idx.exists():
-                for it in json.loads(idx.read_text(encoding="utf-8")):
-                    texts[Path(it["file"]).name] = it.get("text", "")
-            if en_dir.exists():
-                for p in sorted(en_dir.glob("*.wav")):
-                    r = info(p, "英文参考（练英语用）", texts.get(p.name, "")[:36])
-                    if r:
-                        r["name"] = p.stem[:30]
-                        out.append(r)
-        except Exception:
-            pass
-
-        # 4) 自己录的
-        try:
-            for p in sorted(self.cache_dir.glob("rec_*.wav"))[-6:]:
-                r = info(p, "我的录音", "")
-                if r:
-                    r["name"] = p.stem
-                    out.append(r)
-        except Exception:
-            pass
-
-        return {'ok': True, 'refs': out,
-                'hint': '参考音频建议 3–10 秒、单人、干净无背景音乐。'
-                        '克隆出来的音色每次合成都会重新用这段音频，所以要一直留着。'}
+        return {'ok': False, 'msg': '音色克隆已下线', 'refs': []}
 
     def remove_custom_voice(self, vid):
+        """删自定义风格音色（练习页「自定义风格」仍在用，保留）。"""
         try:
             items = json.loads(self.voice_file.read_text(encoding='utf-8')) if self.voice_file.exists() else []
             items = [x for x in items if x.get('id') != vid]
@@ -863,9 +984,40 @@ class Api:
         # （本地 GPT-SoVITS 音色已按终稿 P0 移除）
         return {'ok': True, 'presets': presets,
                 'samples': speech_tts.TEST_SAMPLES,
-                'ttsProvider': self.cfg.get('ttsProvider') or 'mimo'}
+                'ttsProvider': self.cfg.get('ttsProvider') or 'dashscope'}
 
     # ---------- 逐句练习用：拿一句的文本 + 参考音频
+    def sentence_list(self, item_id, q='', limit=0, offset=0):
+        """句子清单（#4 跳转弹窗的数据源）：一次给全，前端本地过滤/搜索。
+
+        一集通常 100~500 句，整包 JSON 只有几十 KB，比分页来回快得多；
+        limit/offset 留给超长材料（有声书整本）兜底。"""
+        try:
+            it = next((x for x in tl.scan_library(self.all_dirs())
+                       if x['id'] == item_id), None)
+            if not it:
+                return {'ok': False, 'msg': '找不到该语料'}
+            en_vtt = _audio_sib(it['audio'], '.en.vtt')
+            if not en_vtt.exists():
+                return {'ok': False, 'msg': '这个语料没有英文字幕，无法跳句——请先生成字幕'}
+            cues = tl.parse_vtt_cues(en_vtt.read_text(encoding='utf-8', errors='replace'))
+            rows = []
+            qq = (q or '').strip().lower()
+            for i, c in enumerate(cues):
+                t = c.get('text') or ''
+                if qq and qq not in t.lower():
+                    continue
+                rows.append({'index': i, 'en': t,
+                             'start': round(float(c.get('start') or 0), 2),
+                             'end': round(float(c.get('end') or 0), 2)})
+            total = len(rows)
+            if limit:
+                rows = rows[int(offset or 0):int(offset or 0) + int(limit)]
+            return {'ok': True, 'total': total, 'cueTotal': len(cues),
+                    'title': it['title'], 'itemId': item_id, 'rows': rows}
+        except Exception as e:
+            return {'ok': False, 'msg': str(e)}
+
     def practice_sentence(self, item_id, index):
         """取某条语料的第 index 句（含英文与中文）。
 
@@ -981,11 +1133,35 @@ class Api:
                     'risk': self._engine().current_risk(text, scene or None) if risky else None}
 
     # ---------- 录音
+    def _mic_device(self):
+        """用户锁定的输入设备：设置页存进 micDevice；没有就返回 None（跟系统默认）。
+        #7：前端不再每次进练习页都把设备下拉重置成 default，后端也不再用 None 直落默认。"""
+        try:
+            v = self.cfg.get('micDevice') if isinstance(self.cfg, dict) else None
+            if v in (None, '', 'default'):
+                return None
+            return int(v)
+        except Exception:
+            return None
+
     def rec_start(self, device=None):
         try:
+            # 前端显式传了有效设备就用它（并记住）；没传就沿用上次锁定的设备
+            if device in (None, '', 'default'):
+                device = self._mic_device()
+            else:
+                try:
+                    device = int(device)
+                except Exception:
+                    device = self._mic_device()
+                if device is not None and device != self.cfg.get('micDevice'):
+                    cfg = tl.load_config()
+                    cfg['micDevice'] = device
+                    tl.save_config(cfg)
+                    self.cfg = cfg
             self._rec.start(device)
             self._recording = True
-            return {'ok': True}
+            return {'ok': True, 'device': device}
         except Exception as e:
             return {'ok': False, 'msg': str(e)}
 
@@ -1005,7 +1181,15 @@ class Api:
             return {'ok': False, 'msg': str(e)}
 
     def rec_devices(self):
-        return speech_asr.Recorder.list_devices()
+        d = speech_asr.Recorder.list_devices()
+        # 额外告诉前端“当前锁定的是哪个设备”，前端据此保持下拉选中（#7）
+        try:
+            if isinstance(d, dict):
+                d = dict(d)
+                d['current'] = self._mic_device()
+        except Exception:
+            pass
+        return d
 
     # ---------- 识别 + 比对 + 纠音（一步到位）
     def practice_check(self, item_id, index, ref_text, rec_file='', rec_url='',
@@ -1047,13 +1231,23 @@ class Api:
                 except Exception as e:
                     diag = {'error': str(e)}
 
-            # 记录练习
+            # 记录练习。score 优先取 LLM 纠音分；没跑纠音（with_llm=False 或 diag 无分）
+            # 时回落本地口径分（listening.score_of：准确率-多读×3，钳 0-100），
+            # 否则数据中心「平均发音得分」与练习记录在手动纠音后长期为空（2026-10-16 修复）。
+            _score = None
+            if isinstance(diag, dict) and isinstance(diag.get('score'), (int, float)):
+                _score = diag['score']
+            else:
+                try:
+                    _score = listening.score_of(cmp)
+                except Exception:
+                    _score = None
             rec = {
                 'at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'itemId': item_id, 'index': index,
                 'en': ref_text, 'heard': r['text'],
                 'accuracy': cmp['accuracy'],
-                'score': (diag or {}).get('score') if isinstance(diag, dict) else None,
+                'score': _score,
                 'wrong': cmp['wrong'], 'missed': cmp['missed'], 'extra': cmp['extra'],
             }
             self._append_practice(rec)
@@ -1184,7 +1378,22 @@ class Api:
         if not items:
             return {'sessions': 0, 'avgAccuracy': 0, 'avgScore': 0, 'recent': []}
         accs = [x.get('accuracy') or 0 for x in items]
-        scores = [x.get('score') for x in items if isinstance(x.get('score'), (int, float))]
+        # 发音得分：没有显式 score 的历史条目按同口径本地分回填（准确率-多读×3，钳 0-100），
+        # 让数据中心不再恒显 0（2026-10-16 修复，写入时已带 score，这里兜底旧数据）。
+        scores = []
+        for x in items:
+            s = x.get('score')
+            if not isinstance(s, (int, float)):
+                # 只有发音/听写类记录才有 accuracy+extra 可比分；invalid 之类跳过
+                if x.get('accuracy') is None:
+                    continue
+                try:
+                    s = listening.score_of({'accuracy': x.get('accuracy') or 0,
+                                            'extra': x.get('extra') or 0})
+                except Exception:
+                    s = None
+            if isinstance(s, (int, float)):
+                scores.append(s)
         today = datetime.now().strftime('%Y-%m-%d')
         return {
             'sessions': len(items),
@@ -1193,6 +1402,7 @@ class Api:
             'today': sum(1 for x in items if (x.get('at') or '').startswith(today)),
             'last10': [
                 {'at': x.get('at'), 'accuracy': x.get('accuracy'), 'score': x.get('score'),
+                 'extra': x.get('extra') or 0,
                  'en': (x.get('en') or '')[:40]}
                 for x in items[-10:]
             ],
@@ -1472,7 +1682,7 @@ class Api:
                         {'id': 'first', 'name': '首字母提示', 'desc': '每个词只给首字母'},
                     ],
                     'asrProvider': cfg.get('asrProvider') or 'dashscope',
-                    'ttsProvider': cfg.get('ttsProvider') or 'mimo',
+                    'ttsProvider': cfg.get('ttsProvider') or 'dashscope',
                     'usesRefAudio': True}
         except Exception as e:
             return {'ok': False, 'msg': str(e)}
@@ -1532,7 +1742,8 @@ class Api:
                    'kind': 'listening', 'itemId': item_id, 'index': index,
                    'mode': mode, 'level': ex['level'],
                    'en': answer, 'heard': user_text, 'accuracy': cmp['accuracy'],
-                   'score': (diag or {}).get('score') if isinstance(diag, dict) else score,
+                   # LLM 判分缺 score 键时回落本地分，别把 None 写进统计（平均分被 None 污染的根因）
+                   'score': (diag or {}).get('score') if isinstance(diag, dict) and isinstance((diag or {}).get('score'), (int, float)) else score,
                    'wrong': cmp['wrong'], 'missed': cmp['missed'], 'extra': cmp['extra']}
             self._append_practice(rec)
             self._bump_item_stats(item_id, index, cmp.get('accuracy'))
@@ -1717,6 +1928,77 @@ class Api:
         ds = [self.cfg.get('libraryDir', '')] + list(self.cfg.get('extraDirs', []))
         return [d for d in ds if d]
 
+    # ---------------- ⑤ 来源类型（演讲 / 对话 / 读书 / 播客）
+    def _stamp_source_kind(self, folder, slug, log=None):
+        """下载完成后把来源类型写进 <slug>.meta.json 的 sourceKind。
+
+        已有值不覆盖（用户手动改过的类型是权威）。分类失败一律静默——
+        它是"锦上添花"，不能因为猜类型把下载结果挡住。"""
+        try:
+            if not folder or not slug:
+                return None
+            mp = Path(folder) / (slug + '.meta.json')
+            data = {}
+            if mp.exists():
+                try:
+                    data = json.loads(mp.read_text(encoding='utf-8')) or {}
+                except Exception:
+                    data = {}
+            old = data.get('sourceKind')
+            if old in videokind.RULES:
+                if log:
+                    log(f'来源类型：{videokind.describe(old)}（沿用已记录）')
+                return old
+            kind = videokind.classify(data.get('title') or slug, data.get('url') or '', data)
+            data['sourceKind'] = kind
+            store.write_json(mp, data)
+            if log:
+                log(f'来源类型：{videokind.describe(kind)} → 记入 meta（{slug}.meta.json）')
+            return kind
+        except Exception:
+            return None
+
+    def video_kinds(self):
+        """素材类型清单（前端选择器用）。顺序即 RULES 的声明顺序，标签/说明都在后端一处维护。"""
+        try:
+            return {'ok': True, 'kinds': [
+                {'id': k, 'label': videokind.label(k), 'desc': videokind.describe(k)}
+                for k in videokind.RULES]}
+        except Exception as e:
+            return {'ok': False, 'msg': str(e), 'kinds': []}
+
+    def set_item_kind(self, item_id, kind=''):
+        """手动纠正来源类型（分类猜错时的急救口）。写 meta，下次生成字幕/后处理按新类型走。"""
+        try:
+            kind = (kind or '').strip()
+            if kind and kind not in videokind.RULES:
+                return {'ok': False, 'msg': '未知类型：' + kind}
+            it = None
+            for x in tl.scan_library(self.all_dirs()):
+                if x.get('id') == item_id:
+                    it = x
+                    break
+            if not it:
+                return {'ok': False, 'msg': '找不到该语料：' + str(item_id)}
+            mp = Path(it['dir']) / (item_id + '.meta.json')
+            data = {}
+            if mp.exists():
+                try:
+                    data = json.loads(mp.read_text(encoding='utf-8')) or {}
+                except Exception:
+                    data = {}
+            if kind:
+                data['sourceKind'] = kind
+            else:
+                data.pop('sourceKind', None)
+            store.write_json(mp, data)
+            k = data.get('sourceKind') or videokind.classify(
+                it.get('title') or item_id, it.get('url') or '', data)
+            return {'ok': True, 'kind': k, 'label': videokind.label(k),
+                    'desc': videokind.describe(k)}
+        except Exception as e:
+            return {'ok': False, 'msg': str(e)}
+
     # ---------------- 库
     def scan(self):
         try:
@@ -1748,7 +2030,48 @@ class Api:
             'text': str(tx) if tx.exists() else '',
             'dir': str(audio.parent),
             'baseName': audio.stem,
+            # 词级时间戳 sidecar（跟读页逐词高亮用）。空串 = 前端不启用词级高亮。
+            'wordsUrl': (self._url(_audio_sib(it['audio'], '.words.json'))
+                         if _audio_sib(it['audio'], '.words.json').exists() else ''),
         }
+
+    def read_words(self, item_id):
+        """读取词级时间戳 sidecar（跟读页卡拉OK/逐词高亮用）。
+
+        .words.json 由 doctor 阶段 3.5 的 local_align 强制对齐产出，结构：
+            {'v','src','cueCount','words':[{'w','s','e','i','sc'}]}
+        s/e = 相对**原始音频起点**的秒（未叠加校准偏移）；i = 所属句号；sc = CTC 置信度。
+
+        返回 {'ok','words','cueCount','stale'}：
+          stale=True 表示 cueCount 与当前英文字幕句数不一致（字幕被改过），
+          前端必须忽略这批词级数据，否则词会串到别的句子上。
+        """
+        try:
+            items = tl.scan_library(self.all_dirs())
+            it = next((x for x in items if x['id'] == item_id), None)
+            if not it:
+                return {'ok': False, 'msg': '找不到该语料'}
+            wp = _audio_sib(it['audio'], '.words.json')
+            if not wp.exists():
+                return {'ok': True, 'words': [], 'cueCount': 0, 'stale': False}
+            try:
+                d = json.loads(wp.read_text(encoding='utf-8', errors='replace'))
+            except Exception:
+                return {'ok': False, 'msg': '.words.json 解析失败（可能写坏）'}
+            words = d.get('words') or []
+            cc = int(d.get('cueCount') or 0)
+            n_cue = 0
+            en_vtt = _audio_sib(it['audio'], '.en.vtt')
+            if en_vtt.exists():
+                try:
+                    n_cue = len(tl.parse_vtt_cues(
+                        en_vtt.read_text(encoding='utf-8', errors='replace')))
+                except Exception:
+                    n_cue = 0
+            stale = bool(cc and n_cue and cc != n_cue)
+            return {'ok': True, 'words': words, 'cueCount': cc, 'stale': stale}
+        except Exception as e:
+            return {'ok': False, 'msg': str(e)[:150]}
 
     def read_url(self, url, limit=3000000):
         """按本地服务 URL 读文本（字幕/文稿）。
@@ -2007,6 +2330,12 @@ class Api:
                     _sid = (res.get('name') or '') or ((res.get('item') or {}).get('id') or '')
                     if _sid:
                         self._smart_finalize(_sid, log=log)
+                except Exception:
+                    pass
+                # ⑤ 来源类型分类（演讲/对话/读书/播客 → 后处理参数不同），记入 meta
+                try:
+                    _slug = res.get('name') or (res.get('item') or {}).get('id') or ''
+                    self._stamp_source_kind(res.get('dir'), _slug, log=log)
                 except Exception:
                     pass
                 self._dl['result'] = res
@@ -2865,12 +3194,12 @@ class Api:
 
     # ---------- 单词发音 / 批量合成 / TTS 缓存 ----------
     def speak_word(self, text):
-        """单词/短语朗读：强制 Edge en-US（绕过场景引擎覆盖），失败退 MiMo。"""
+        """单词/短语朗读：强制 Edge en-US（绕过场景引擎覆盖），失败退当前可用引擎。"""
         try:
             eng = self._engine()
-            path = eng.synthesize_word(str(text or '').strip())
+            path, via = eng.synthesize_word(str(text or '').strip())
             self._refresh_roots()
-            return {'ok': True, 'url': self._url(path), 'file': path, 'via': 'edge'}
+            return {'ok': True, 'url': self._url(path), 'file': path, 'via': via}
         except Exception as e:
             return {'ok': False, 'msg': str(e)}
 
@@ -3105,7 +3434,11 @@ class Api:
             return {'ok': False, 'msg': str(e)[:150]}
 
     def _cues_of_item(self, item_id):
-        """按 id 取语料与英文字幕 cues（合并/拆分/校准共用的取数）。"""
+        """按 id 取语料与英文字幕 cues（合并/拆分/校准共用的取数）。
+
+        必须按 start 排好序再动：有的源字幕是滚动式（同句反复出现、时间重叠）或
+        顺序错乱，按文件顺序「并入上一句」会把时间上并不相邻的两句粘在一起，
+        表现就是用户说的「合完前面莫名多出一句」。"""
         items = tl.scan_library(self.all_dirs())
         it = next((x for x in items if x['id'] == item_id), None)
         if not it:
@@ -3116,7 +3449,81 @@ class Api:
         cues = tl.parse_vtt_cues(en_vtt.read_text(encoding='utf-8', errors='replace'))
         if not cues:
             return it, None, '字幕解析为空'
+        cues = [c for c in cues if (c.get('text') or '').strip()]
+        starts = [float(c['start']) for c in cues]
+        if starts != sorted(starts):
+            cues.sort(key=lambda c: (float(c['start']), float(c['end'])))
         return it, cues, ''
+
+    @staticmethod
+    def _frag_ratio(cues):
+        """碎片化粗判：句尾无句末标点、且下一条以小写开头的占比。
+
+        第11问实测：94 分钟朗读落盘的 .en.vtt 有 21.6% 这种句尾、26.2% 下一条小写起头
+        ——一条完整句被拦腰切成两三条。这个比例是用来决定"落盘前要不要再组装一遍"的。
+        """
+        if not cues:
+            return 0.0
+        n = bad = 0
+        for i, c in enumerate(cues):
+            text = (c.get('text') or '').strip()
+            if not text:
+                continue
+            n += 1
+            core = text.rstrip().rstrip('\'"\u2019\u201d\uff09\u300b\u300d').rstrip()
+            if core.endswith(('.', '!', '?', '\u2026', '\u3002', '\uff01', '\uff1f')):
+                continue
+            nxt = ''
+            if i + 1 < len(cues):
+                nxt = (cues[i + 1].get('text') or '').lstrip()
+            if nxt[:1].islower():
+                bad += 1
+        return bad / float(n or 1)
+
+    def _selfheal_cues(self, cues, kind=None, log=None):
+        """落盘前兜底组装：碎片化超过 6% 就再跑一遍语义段落组装，并写清楚日志。
+
+        为什么要在写入侧兜底：读取侧（`_cues_of`）本来就有组装兜底，可 .对照.md、
+        字幕视图、导出的 SRT 都是直接读文件的——只有落盘的是好句子，用户看到的
+        才是好句子。任何生成路径（含老构建、旁支脚本）只要漏了组装层，这里补上。
+        """
+        try:
+            ratio = self._frag_ratio(cues)
+        except Exception:
+            return cues
+        if ratio <= 0.06:
+            return cues
+        try:
+            if log:
+                log('检测到字幕碎片化（%.0f%% 的句子结尾没有句末标点、下一条接着小写），'
+                    '落盘前自动按语义段落重组装…' % (ratio * 100))
+            if hasattr(videosrc, 'resegment_cues'):
+                fixed = videosrc.resegment_cues(cues, kind=kind, log=log)
+            else:
+                fixed = videosrc.assemble_sentences(cues)
+            fixed = [c for c in (fixed or []) if (c.get('text') or '').strip()]
+            if fixed and len(fixed) > 1:
+                if log:
+                    log('自动重组装完成：%d 句 → %d 句' % (len(cues), len(fixed)))
+                return fixed
+        except Exception as e:
+            if log:
+                log('自动重组装失败（%s），按原样落盘' % str(e)[:80])
+        return cues
+
+    @staticmethod
+    def _doctor_split_params(it):
+        """校准/切句的切分上限：按来源类型取（videokind.rules）。
+
+        以前四个调用点全写死 max_words=16 / max_dur=9.0。16 词比一句普通英文句子还短，
+        结果把完整句子按逗号剁成一条条——用户第11问说的"死板切成一条条"就是这里来的。
+        """
+        try:
+            import videokind as _vk
+            r = _vk.rules(((it or {}).get('sourceKind') or '').strip() or None)
+            return int(r.get('max_words') or 45), float(r.get('max_dur') or 12.0)
+        except Exception:
+            return 45, 12.0
 
     def _write_en_with_backup(self, it, cues):
         outdir = Path(it['audio']).parent
@@ -3158,7 +3565,8 @@ class Api:
         """句级手动合并（用户排期①）：把第 index 句并入上一句。
 
         文本空格拼接、时间窗=上句 start ~ 本句 end（音频窗口自然合并）；
-        中文不动（显示时按时间重叠匹配自然适配）；词级 sidecar 重映射句号。
+        中文侧落在该窗内的也一并合成一条（否则显示时「按时间重叠拼接」会把两句中文
+        都塞进这一句，看着就像"没真合并"）；词级 sidecar 重映射句号。
         """
         try:
             it, cues, err = self._cues_of_item(item_id)
@@ -3172,16 +3580,60 @@ class Api:
                            + (cur.get('text') or '').strip()).strip()
             prev['text'] = merged_text
             prev['end'] = max(float(prev['end']), float(cur['end']))
+            win_s, win_e = float(prev['start']), float(prev['end'])
             del cues[index]
             self._write_en_with_backup(it, cues)
+            # 中文同步合并：以前只动英文字幕，合并后这句的时间窗横跨两条中文，
+            # 显示时「按时间重叠拼接」就把两句中文都塞进同一句（用户看到的“多出一句”
+            # 观感来源之一）。中文窗口落在合并窗内的也合成一条，中英保持一一对应。
+            zh_merged = self._merge_zh_in_window(it, win_s, win_e)
             self._remap_words_i(it, lambda i, s: (index - 1 if i == index
                                                   else (i - 1 if i > index else i)),
                                 len(cues))
             self._refresh_roots()
             return {'ok': True, 'index': index - 1, 'total': len(cues),
-                    'text': merged_text[:120]}
+                    'text': merged_text[:120], 'zhMerged': zh_merged}
         except Exception as e:
             return {'ok': False, 'msg': str(e)[:150]}
+
+    def _merge_zh_in_window(self, it, win_s, win_e):
+        """把 .zh.vtt 里时间窗落在 [win_s, win_e] 的中文句合成一条（英中合并后调用）。
+
+        只处理「确实落在窗内」的句子；窗外的中文时间不动，避免整体漂移。
+        返回被合并掉的中文条数（0 = 没动中文）。"""
+        zh_vtt = _audio_sib(it['audio'], '.zh.vtt')
+        if not zh_vtt.exists():
+            return 0
+        try:
+            zh = tl.parse_vtt_cues(zh_vtt.read_text(encoding='utf-8', errors='replace'))
+        except Exception:
+            return 0
+        if not zh:
+            return 0
+        hits = [z for z in zh
+                if float(z['start']) < win_e - 0.05 and float(z['end']) > win_s + 0.05]
+        if len(hits) < 2:
+            return 0
+        try:
+            first = hits[0]
+            first['text'] = ''.join((z.get('text') or '').strip() for z in hits)
+            first['end'] = max(float(z['end']) for z in hits)
+            drop = {id(z) for z in hits[1:]}
+            zh = [z for z in zh if id(z) not in drop]
+            outdir = Path(it['audio']).parent
+            stem = Path(it['audio']).stem
+            for suffix in ('.zh.vtt', '.zh.srt'):
+                p = outdir / (stem + suffix)
+                if p.exists():
+                    try:
+                        p.with_suffix(p.suffix + '.bak2').write_bytes(p.read_bytes())
+                    except Exception:
+                        pass
+            tl.write_srt(outdir / f'{stem}.zh.srt', zh)
+            tl.srt_to_vtt(outdir / f'{stem}.zh.srt', outdir / f'{stem}.zh.vtt')
+            return len(hits) - 1
+        except Exception:
+            return 0
 
     def sentence_split(self, item_id, index, at_words):
         """句级手动拆分：第 index 句从第 at_words 个词后拆成两句。
@@ -3228,6 +3680,160 @@ class Api:
                     'front': front['text'][:60], 'back': back['text'][:60]}
         except Exception as e:
             return {'ok': False, 'msg': str(e)[:150]}
+
+    def item_resegment(self, item_id):
+        """离线重切句（第11问）：把已有 .en.vtt 按「语义段落」重组装，不重跑语音识别、零费用。
+
+        为什么需要：长视频/整本书朗读的 ASR 是按停顿出句的，实测 94 分钟朗读 1230 条里
+        21.5% 结尾没有句末标点、20.7% 下一条以小写/连词起头——句子被拦腰切断；反过来
+        讲解类又会一条一句、失去段落感。用户要的是「一整段含义一条」。
+        这里复用 videosrc 的组装层（碎片合并 → 句末拆分 → 含义段落合并 → 只在语义弱
+        边界切超长 → 静音吸附），英文重建后中文按时间重叠重映射、.对照.md 同步重建。
+        词级 sidecar（.words.json）与新句号对不上就丢弃，doctor 会按需重建。
+        """
+        try:
+            it, cues, err = self._cues_of_item(item_id)
+            if err:
+                return {'ok': False, 'msg': err}
+            kind = (it.get('sourceKind') or '').strip() or None
+            dur = float(it.get('duration') or 0) or None
+            log = []
+
+            def _l(msg):
+                log.append(str(msg))
+
+            try:
+                new = videosrc.resegment_cues(cues, audio_path=it.get('audio'),
+                                              duration=dur, kind=kind, log=_l)
+            except AttributeError:
+                new = videosrc.assemble_sentences(cues)     # 老版本兜底：只做碎片合并
+            new = [c for c in (new or []) if (c.get('text') or '').strip()]
+            if not new:
+                return {'ok': False, 'msg': '重组装结果为空，未改动任何文件'}
+            if len(new) == len(cues) and all(
+                    (a.get('text') or '').strip() == (b.get('text') or '').strip()
+                    for a, b in zip(new, cues)):
+                return {'ok': True, 'changed': False, 'total': len(new),
+                        'msg': '当前字幕已经是语义段落，不需要重切', 'log': log[-6:]}
+            before = len(cues)
+            self._write_en_with_backup(it, new)
+            zh_n = self._reflow_zh_to_windows(it, new)
+            self._try_write_bilingual(it, new)
+            wp = _audio_sib(it['audio'], '.words.json')
+            try:
+                if wp.exists():
+                    wj = json.loads(wp.read_text(encoding='utf-8'))
+                    if int(wj.get('cueCount') or -1) != len(new):
+                        wp.unlink(missing_ok=True)
+            except Exception:
+                try:
+                    wp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._refresh_roots()
+            return {'ok': True, 'changed': True, 'before': before, 'total': len(new),
+                    'zhCues': zh_n, 'msg': '已重切：%d 条 → %d 条' % (before, len(new)),
+                    'log': log[-8:]}
+        except Exception as e:
+            return {'ok': False, 'msg': str(e)[:180]}
+
+    @staticmethod
+    def _zh_split_pieces(text):
+        """中文按句末标点切块（重映射到多条英文句时按块分配，尽量不切半句）。"""
+        t = (text or '').strip()
+        if not t:
+            return []
+        parts, buf = [], ''
+        for ch in t:
+            buf += ch
+            if ch in '。！？；!?;':
+                parts.append(buf.strip())
+                buf = ''
+        if buf.strip():
+            parts.append(buf.strip())
+        return parts or [t]
+
+    def _reflow_zh_to_windows(self, it, new_cues):
+        """把旧 .zh.vtt 按时间重叠重新映射到新的英文句窗口（重切句后调用）。
+
+        规则：每条旧中文句**只归给与它重叠最多的那一条新英文句**（完全没重叠的
+        归给起点最近的一条），再把归到同一窗口的中文按时间顺序拼回去。
+        这样中文不丢、不重复，也不会出现「一句英文配两段不相干中文」的错位
+        ——第一版按窗口取样实测 1032 条中文只剩 821 条，就是丢了。
+        返回新中文条数（0 = 没有中文或失败）。
+        """
+        zh_vtt = _audio_sib(it['audio'], '.zh.vtt')
+        if not zh_vtt.exists():
+            return 0
+        try:
+            old = tl.parse_vtt_cues(zh_vtt.read_text(encoding='utf-8', errors='replace'))
+        except Exception:
+            return 0
+        if not old:
+            return 0
+        import bisect
+        old.sort(key=lambda z: float(z.get('start') or 0))
+        wins = sorted(new_cues, key=lambda c: float(c.get('start') or 0))
+        if not wins:
+            return 0
+        starts = [float(c.get('start') or 0) for c in wins]
+        buckets = [[] for _ in wins]
+        for z in old:
+            zs = float(z.get('start') or 0)
+            ze = float(z.get('end') or 0)
+            k = max(0, bisect.bisect_right(starts, zs) - 1)
+            best, best_ov = None, 0.0
+            while k < len(wins) and starts[k] < max(ze, zs + 0.01):
+                ov = min(ze, float(wins[k].get('end') or 0)) - max(zs, starts[k])
+                if ov > best_ov:
+                    best, best_ov = k, ov
+                k += 1
+            if best is None:                # 中文落在句间静音里：给起点最近的一条
+                best = min(range(len(wins)), key=lambda q: abs(starts[q] - zs))
+            text = (z.get('text') or '').strip()
+            if text:
+                buckets[best].append((zs, text))
+        out = []
+        for c, items in zip(wins, buckets):
+            if not items:
+                continue
+            items.sort(key=lambda x: x[0])
+            text = ''.join(t for _s, t in items).strip()
+            if text:
+                out.append({'start': round(float(c.get('start') or 0), 3),
+                            'end': round(float(c.get('end') or 0), 3),
+                            'text': text})
+        if not out:
+            return 0
+        outdir = Path(it['audio']).parent
+        stem = Path(it['audio']).stem
+        for suffix in ('.zh.vtt', '.zh.srt'):
+            p = outdir / (stem + suffix)
+            if p.exists():
+                try:
+                    p.with_suffix(p.suffix + '.bak2').write_bytes(p.read_bytes())
+                except Exception:
+                    pass
+        tl.write_srt(outdir / (stem + '.zh.srt'), out)
+        tl.srt_to_vtt(outdir / (stem + '.zh.srt'), outdir / (stem + '.zh.vtt'))
+        return len(out)
+
+    def _try_write_bilingual(self, it, en_cues):
+        """重切后同步重建 .对照.md（对照阅读页看到的就是新句子）。失败不影响主流程。"""
+        try:
+            zh = []
+            zp = _audio_sib(it['audio'], '.zh.vtt')
+            if zp.exists():
+                zh = tl.parse_vtt_cues(zp.read_text(encoding='utf-8', errors='replace'))
+            outdir = Path(it['audio']).parent
+            stem = Path(it['audio']).stem
+            tl.write_bilingual(outdir / (stem + '.对照.md'), en_cues, zh,
+                               it.get('title') or stem,
+                               '重切句子于 %s（仅重组装，未重跑语音识别）'
+                               % datetime.now().strftime('%Y-%m-%d %H:%M'))
+            return True
+        except Exception:
+            return False
 
     # ---------- 语料 AI 摘要 ----------
     def _summaries(self):
@@ -3685,6 +4291,8 @@ class Api:
                         setprog('asr', None, '', '语音转写中…')
                     cues, gummy_zh = videosrc._asr_to_cues(it['audio'], Path(it['audio']).parent,
                                                            asr, say, dur, mode=mode)
+                    cues = self._selfheal_cues(          # 第11问：落盘前兜底
+                        cues, kind=(it.get('sourceKind') or None), log=say)
                     mon['on'] = False
                     setprog('asr', 100.0, '', '转写完成')
                     say(f'转写完成：{len(cues)} 句')
@@ -3817,6 +4425,7 @@ class Api:
                             'progress': {'phase': 'diagnose', 'pct': None, 'speed': '',
                                          'detail': '读取与诊断中…'}}
             self._docgen['pause'].set()
+            _sw, _sd = self._doctor_split_params(it)   # 第11问：按来源类型切，不再写死 16 词
 
             def _ck():
                 """取消检查点：用户点了 ⏹ 后在批次间/落盘前抛出，字幕原样不写。"""
@@ -3837,6 +4446,32 @@ class Api:
             def setprog(phase, pct=None, speed='', detail=''):
                 self._docgen['progress'] = {'phase': phase, 'pct': pct,
                                             'speed': speed, 'detail': detail}
+
+            def _mk_prog(base, span, label):
+                """生成带 ETA 的对齐进度回调。
+
+                local_align 只报 (done_wins, total_wins)，长视频用户看不到还剩多久：
+                MMS_FA 约 3.9× 实时，2 小时音频要跑 ≈47 分钟。这里按已完成比例
+                外推剩余时间；前 2% 不估（样本太少，估出来会乱跳）。
+                """
+                t0 = [time.time()]
+
+                def _p(d, t, ph):
+                    frac = (d / t) if t else 0.0
+                    eta = ''
+                    if d > 0 and frac > 0.02:
+                        el = time.time() - t0[0]
+                        if el >= 1.0:
+                            remain = el / frac * (1.0 - frac)
+                            if remain >= 60:
+                                eta = (f'（剩余约 {int(remain // 60)} 分 '
+                                       f'{int(remain % 60)} 秒）')
+                            elif remain >= 1:
+                                eta = f'（剩余约 {int(remain)} 秒）'
+                    setprog('align', base + int(span * frac), ph or '',
+                            f'{label} {d}/{t} 窗{eta}')
+
+                return _p
 
             def run():
                 try:
@@ -3942,7 +4577,12 @@ class Api:
                                 import tempfile as _tf
                                 _rdir = Path(_tf.mkdtemp(prefix='ted_realign_'))
                                 try:
-                                    _rc, _realign_stats = asr_align.realign_all(
+                                    # 长音频走分块版（E-07）：realign_all 有 90 分钟硬上限，
+                                    # 超过就直接抛错，用户只能重新生成字幕。分块版把音频切成
+                                    # 若干 8 分钟的责任窗口各自识别后拼成一条全局词流，再走
+                                    # 与短音频完全相同的逐句定位逻辑，因此行为一致、
+                                    # 只是不再有长度上限。短音频内部直接转调 realign_all。
+                                    _rc, _realign_stats = asr_align.realign_all_chunked(
                                         it['audio'], cues, align_asr, tl.FFMPEG, _rdir,
                                         duration=_adur, log=say,
                                         pause_wait=lambda: (self._docgen['pause'].wait(), _ck())[1])
@@ -3970,7 +4610,7 @@ class Api:
                                     try:
                                         _newcues, _ = videosrc._asr_to_cues(
                                             it['audio'], _rdir2, align_asr, say, _adur,
-                                            mode='traditional')
+                                            mode='traditional', keep_asr_model=True)
                                     finally:
                                         import shutil as _sh3
                                         _sh3.rmtree(_rdir2, ignore_errors=True)
@@ -3999,7 +4639,7 @@ class Api:
                                       if float(c['start']) < we + 0.05
                                       and float(c['end']) > ws - 0.05]
                             fw = videosrc.sanitize_cues(inside)
-                            fw = videosrc._split_long_cues(fw, max_words=16, max_dur=9.0)
+                            fw = videosrc._split_long_cues(fw, max_words=_sw, max_dur=_sd)
                             for i in range(len(fw) - 1):
                                 if fw[i]['end'] > fw[i + 1]['start']:
                                     fw[i]['end'] = max(fw[i]['start'] + 0.4, fw[i + 1]['start'])
@@ -4012,7 +4652,7 @@ class Api:
                         say(f'本地修正：{len(wins)} 个窗 → {len(fixed)} 句')
                     else:
                         fixed = videosrc.sanitize_cues(cues)
-                        fixed = videosrc._split_long_cues(fixed, max_words=16, max_dur=9.0)
+                        fixed = videosrc._split_long_cues(fixed, max_words=_sw, max_dur=_sd)
                         for i in range(len(fixed) - 1):
                             if fixed[i]['end'] > fixed[i + 1]['start']:
                                 fixed[i]['end'] = max(fixed[i]['start'] + 0.4,
@@ -4065,9 +4705,8 @@ class Api:
                             _g_cues, _g_stats, _g_words = local_align.align_cues(
                                 it['audio'], fixed, tl.FFMPEG, log=say,
                                 pause_wait=lambda: (self._docgen['pause'].wait(), _ck())[1],
-                                progress=lambda d, t, ph: setprog(
-                                    'align', 5 + int(25 * d / max(1, t)),
-                                    ph or '', f'连贯性校对 {d}/{t} 窗'))
+                                progress=_mk_prog(5, 25, '连贯性校对'),
+                                cache_dir=self.cache_dir)
                             _per = _g_stats.get('per_cue') or []
                             _low = [i for i, e in enumerate(_per)
                                     if e and e['total'] > 0 and e['matched'] * 2 < e['total']]
@@ -4086,14 +4725,14 @@ class Api:
                                     _newcues, _ = videosrc._asr_to_cues(
                                         it['audio'], _rdir3, align_asr, say,
                                         float(it.get('duration') or 0),
-                                        mode='traditional')
+                                        mode='traditional', keep_asr_model=True)
                                 finally:
                                     import shutil as _sh4
                                     _sh4.rmtree(_rdir3, ignore_errors=True)
                                 cues[:] = _newcues
                                 zh_cues[:] = []       # 旧中文跟着旧文本走，一并作废（阶段3 全量重译）
                                 fixed = videosrc.sanitize_cues(cues)
-                                fixed = videosrc._split_long_cues(fixed, max_words=16, max_dur=9.0)
+                                fixed = videosrc._split_long_cues(fixed, max_words=_sw, max_dur=_sd)
                                 say(f'重转写重建完成：{len(cues)} 句，继续 LLM 校对（新文本无需证据）')
                                 astats = {}
                                 evidence_list = []
@@ -4181,6 +4820,19 @@ class Api:
                         # --- P0-A 提速：LLM 批次并行（默认 3 路可调）+ P0-B 证据标注入行 ---
                         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+                        # --- P3/H-04：LLM 批次结果缓存 ---
+                        # 同一批文本 + 同一提示词版本 + 同一模型 → 直接秒回不再请求。
+                        # 实现在模块级 _llm_json_cached（可单测），这里只绑定本次上下文。
+                        try:
+                            _pv = str(prompts.version_of('subtitle_doctor') or '')
+                        except Exception:
+                            _pv = ''
+                        _llm_stat = {'hit': 0, 'miss': 0}
+
+                        def _llmc(_sys, _user):
+                            return _llm_json_cached(self.cache_dir, _pv, model_name,
+                                                    _sys, _user, _llm_stat, llm)
+
                         def _batch_task(bi):
                             """单批任务：暂停检查→拼行（带 ⚠ 证据标）→chat_json。
                             工作线程只返回数据，say/setprog 留给 doctor 主线程。"""
@@ -4213,7 +4865,7 @@ class Api:
                                 sys_p, _u = prompts.get('subtitle_doctor')
                                 user = prompts.fmt('subtitle_doctor', lines=lines, user_note=note_line,
                                                    evidence=evidence_param)
-                                data = llm.chat_json(sys_p, user, max_tokens=4000, tag='字幕诊断')
+                                data = _llmc(sys_p, user)
                                 return {'bi': bi, 'data': data, 'err': None, 'chunk': chunk}
                             except Exception as e:
                                 return {'bi': bi, 'data': None, 'err': str(e)[:80], 'chunk': chunk}
@@ -4295,6 +4947,9 @@ class Api:
                                 zh_out.append({'start': c['start'], 'end': c['end'],
                                                'text': zh_txt})
                         zh_out = [z for z in zh_out if z['text']]
+                        if _llm_stat['hit']:
+                            say(f'LLM 批次命中缓存 {_llm_stat["hit"]} 批'
+                                f'（这批文本没变，未再请求模型）')
                         if en_fixed_n:
                             say(f'LLM 校对：修正错词 {en_fixed_n} 句')
                         if zh_fallback_n:
@@ -4303,7 +4958,7 @@ class Api:
                             say('修改理由示例：' + ' | '.join(why_lines))
                     else:
                         # 无 LLM：中文同样过一遍切分（与英文句保持时间对齐）
-                        zh_out = videosrc._split_long_cues(zh_cues, max_words=16, max_dur=9.0)
+                        zh_out = videosrc._split_long_cues(zh_cues, max_words=_sw, max_dur=_sd)
                         say('未配 LLM：只做本地修正（切句+时间戳），不校对翻译')
 
                     # ---- 阶段4 落盘（覆盖原字幕，自动留 .bak） ----
@@ -4318,7 +4973,7 @@ class Api:
                             s, e = float(c['start'] or 0), float(c['end'] or 0)
                             if e <= s:                                  # 倒时长 → 保底 0.3s
                                 e = s + 0.3
-                            elif e - s < 0.2:                           # 过短 → 拉到 0.2s
+                            elif e - s < 0.2 - 1e-6:                    # 过短 → 拉到 0.2s（1e-6 容差：3 位小数相减会得 0.1999999999999886）
                                 e = s + 0.2
                             if out and s < out[-1]['end'] + 0.02:
                                 # 与前句重叠：优先**剪前句的 end**（前句尾音频少一点点），
@@ -4333,6 +4988,88 @@ class Api:
                             c['start'], c['end'] = round(s, 3), round(e, 3)
                             out.append(c)
                         return out
+
+                    def _enforce_invariants(cs, dur=None):
+                        """落盘前最后一道闸：强制时间轴不变式，返回 (cues, violations)。
+
+                        _final_deoverlap 已覆盖倒挂/过短/句间重叠；这里补它管不到的两类：
+                          I3 越界——end 超出音频真实时长（实测语料有 (Applause) 标到 1151s
+                             而音频只有 1148.32s，播放器 seek 会失败/停在末尾）
+                          I1 兜底——修正后仍倒挂/过短的极端情况
+                        只做"钳制到合法"，不改文本、不动别的句；全部记日志，便于回溯。
+                        """
+                        v = []
+                        out = []
+                        prev_end = 0.0
+                        for i, c in enumerate(cs):
+                            s = float(c.get('start') or 0)
+                            e = float(c.get('end') or 0)
+                            if e <= s:                              # I1 倒挂
+                                e = s + 0.3
+                                v.append(('INVERT', i))
+                            if e - s < 0.2 - 1e-6:                  # I1 过短（同上，容差防浮点假阳性）
+                                e = s + 0.2
+                                v.append(('TOO_SHORT', i))
+                            if s < prev_end - 0.02:                 # I2 与前句重叠
+                                s = prev_end
+                                v.append(('OVERLAP', i))
+                            if dur and dur > 0:
+                                # 用 floor 到毫秒，避免 round(1148.319637,3)=1148.32 仍高 0.36ms
+                                _dur_ms = math.floor(dur * 1000) / 1000.0
+                                if s >= _dur_ms:                    # I3 start 已越过音频末尾
+                                    s = max(0.0, _dur_ms - 0.5)
+                                    v.append(('START_BEYOND', i))
+                                if e > _dur_ms:                     # I3 end 越界
+                                    e = _dur_ms
+                                    v.append(('OVERRUN', i))
+                            if e <= s:
+                                e = s + 0.2
+                            c = dict(c)
+                            c['start'] = round(s, 3)
+                            c['end'] = round(e, 3)
+                            out.append(c)
+                            prev_end = c['end']
+                        return out, v
+
+                    def _clamp_words_to_cues(words, cues):
+                        """把词级时间夹进所属句的区间（E-09），返回 (新词表, 被夹数量)。
+
+                        `.words.json` 在阶段 3.5 强制对齐时写盘，而 `_enforce_invariants`
+                        要到之后才夹句界（典型：(Applause) 句 end 1151.000 → 1148.319），
+                        词就可能落到句界外。前端 markWordAt 拿词时间与播放位置比对，
+                        落在界外的词永远不亮 → 表现成「这一句逐词高亮整句失效」。
+
+                        处理原则——宁可不亮，也不能亮到别的句子上：
+                          · 与句区间有交集 → s/e 夹进 [cue.start, cue.end]
+                          · 完全在界外     → 丢弃该词
+                        """
+                        n = 0
+                        kept = []
+                        for w in words:
+                            try:
+                                i = int(w.get('i'))
+                            except (TypeError, ValueError):
+                                kept.append(w)
+                                continue
+                            if not (0 <= i < len(cues)):
+                                kept.append(w)
+                                continue
+                            cs = float(cues[i]['start'])
+                            ce = float(cues[i]['end'])
+                            ws_ = float(w.get('s') or 0)
+                            we_ = float(w.get('e') or 0)
+                            ns, ne = max(ws_, cs), min(we_, ce)
+                            if ne <= ns:                 # 完全在界外 → 丢
+                                n += 1
+                                continue
+                            if abs(ns - ws_) > 1e-6 or abs(ne - we_) > 1e-6:
+                                w = dict(w)
+                                w['s'] = round(ns, 3)
+                                w['e'] = round(ne, 3)
+                                n += 1
+                            kept.append(w)
+                        return kept, n
+
                     # ---- 落盘前统一到句子口径（B2 根治 + 去重落盘）----
                     # 上游 fixed 是 16 词切分粒度（给 LLM 批次用的），落盘前重新组装：
                     # 碎片拼回 + 重复句去重 + 句末拆分。这样 盘=展示(_cues_of)=lvl
@@ -4347,6 +5084,7 @@ class Api:
                     # 词级时间戳（几十 ms 精度）重写每句 start/end；副产品 .words.json
                     # 供跟读页卡拉OK高亮。失败/无 torch 保留现有时间轴（永远不比现状差）。
                     _fa_map = None   # [(旧窗口, 新窗口)] en 映射表（中文句跟随平移用）
+                    _fa_words = []   # 词级时间戳（阶段 3.5 产出；E-09 夹紧要读，必须先初始化）
                     if _use_fa and fixed:
                         try:
                             _fa_old = [(float(c['start']), float(c['end'])) for c in fixed]
@@ -4354,9 +5092,8 @@ class Api:
                             _fixed2, _fa_stats, _fa_words = local_align.align_cues(
                                 it['audio'], fixed, tl.FFMPEG, log=say,
                                 pause_wait=lambda: (self._docgen['pause'].wait(), _ck())[1],
-                                progress=lambda d, t, ph: setprog(
-                                    'align', 8 + int(87 * d / max(1, t)),
-                                    ph or '', f'本地对齐 {d}/{t} 窗'))
+                                progress=_mk_prog(8, 87, '本地对齐'),
+                                cache_dir=self.cache_dir)
                             if _fa_stats.get('aligned'):
                                 fixed = _fixed2
                                 _fa_map = list(zip(
@@ -4384,8 +5121,34 @@ class Api:
                                 "短促句本来就快，通常无需处理）")
                         else:
                             say(f"⚠ 仍有 {len(_fast)} 句语速>5词/秒（对齐证据不足以校准，建议用「⏱ 校准」整体平移或换句修）")
+                    # ---- 不变式守卫：落盘前最后一次校对时间轴（I3 越界 / I1 兜底）----
+                    # 位置必须在阶段 3.5 强制对齐之后——那一步会用词级时间戳重写 start/end，
+                    # 放在它之前等于没检查。音频时长取 ffprobe 实测值（带缓存）。
+                    try:
+                        _audio_dur = tl.probe_duration(it['audio'])
+                    except Exception:
+                        _audio_dur = None
+                    fixed, _viol = _enforce_invariants(fixed, _audio_dur)
+                    if _viol:
+                        say(f'时间轴不变式修正 {len(_viol)} 处（音频时长 '
+                            f'{"%.2fs" % _audio_dur if _audio_dur else "未知"}）：'
+                            f'{_viol[:6]}')
                     outdir = Path(it['audio']).parent
                     slug = Path(it['audio']).stem
+                    # ---- E-09：句界被守卫夹短后，把词级时间同步夹回并重写 sidecar ----
+                    # .words.json 在阶段 3.5 就写了，_enforce_invariants 之后才夹句界，
+                    # 不夹回来的话前端那一句的逐词高亮会整句失效。
+                    if _fa_words:
+                        _fa_words, _wc = _clamp_words_to_cues(_fa_words, fixed)
+                        if _wc:
+                            say(f'词级时间戳按句界夹紧 {_wc} 个词（.words.json 同步重写）')
+                            try:
+                                store.write_json(outdir / f'{slug}.words.json',
+                                                 {'v': 1, 'src': 'mms_fa',
+                                                  'cueCount': len(fixed),
+                                                  'words': _fa_words})
+                            except Exception as _we:
+                                say(f'⚠ .words.json 重写失败：{str(_we)[:70]}')
                     # 备份：单代覆盖（旧 .bak 已存在先删，WinError183 修复）
                     def _bak(p):
                         if not p.exists():
@@ -4654,9 +5417,23 @@ class Api:
                 else:
                     speech_only = [m for m in speech_only if not _bad.search(m)]
                 builtin_ids = [m['id'] for m in builtin_reg.get('builtin', [])]
+                if category == 'tts':
+                    # #8 兜底：拉取路径也不能把旧代模型灌进下拉——统一过供应商目录过滤
+                    # （内置最新一代为准；网关还返回旧别名时由 aliases 映射拦掉）
+                    try:
+                        speech_only, _fnote = spv.filter_pulled_models(pid, speech_only)
+                        if _fnote:
+                            msg_extra = _fnote
+                        else:
+                            msg_extra = ''
+                    except Exception:
+                        msg_extra = ''
+                else:
+                    msg_extra = ''
                 merged = list(dict.fromkeys(builtin_ids + speech_only))   # 内置保底在前 + 去重
                 msg = (f'拉到 {len(pulled)} 个，过滤出 {len(speech_only)} 个语音模型'
-                       + (f'（另并入内置 {len(builtin_ids)} 个）' if speech_only else '（用内置清单兜底）'))
+                       + (f'（另并入内置 {len(builtin_ids)} 个）' if speech_only else '（用内置清单兜底）')
+                       + (f'；{msg_extra}' if msg_extra else ''))
                 return {'ok': True, 'models': merged, 'source': 'pull', 'msg': msg}
             models = [m['id'] for m in (builtin_reg.get('builtin') or custom_reg.get('models') or [])]
             return {'ok': True, 'models': models, 'source': 'builtin',

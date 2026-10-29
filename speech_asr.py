@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 语音识别（ASR）+ 本地录音
@@ -214,7 +214,40 @@ def _merge_part_sentences(bounds, results):
                 del out[j]
             out.append(s)
             out.sort(key=lambda x: x['start'])
-    return out
+    return _enforce_monotonic(out)
+
+
+def _enforce_monotonic(sents, tol=0.02, min_dur=0.2):
+    """合并后全局单调化（E-08）：消除跨片残留重叠与塌缩。
+
+    `_merge_part_sentences` 只按词集相似度删跨片重复句，删完**时间轴不保证单调**：
+    相邻两片各自断出的长句可在边界处交叠 1~1.5s（约等于 ASR 的 overlap 宽度），
+    前端按 start 找当前句就会出现「高亮已跳到下一句、音频还在上一句」。
+
+    规则（与 app._enforce_invariants 的 I1/I2 同口径）：
+      · start[i] >= end[i-1] - tol
+      · end[i] - start[i] >= min_dur
+    优先压缩前一句的尾巴（它本来就是跨片冗余的重叠部分），
+    前一句压到 min_dur 仍不够时，才把后一句整体后推。
+    原地修改并返回 sents（调用方传入的都是本函数新建的 dict，可安全改写）。
+    """
+    if not sents:
+        return sents
+    sents.sort(key=lambda x: x['start'])
+    # 首句没有"前一句"可对齐，塌缩要单独兜底（否则 end<=start 的首句会漏网）
+    if sents[0]['end'] - sents[0]['start'] < min_dur:
+        sents[0]['end'] = round(sents[0]['start'] + min_dur, 3)
+    for i in range(1, len(sents)):
+        p, c = sents[i - 1], sents[i]
+        if c['start'] < p['end'] - tol:
+            cut = max(p['start'] + min_dur, c['start'])   # 前句至少留 min_dur
+            if cut < p['end']:
+                p['end'] = round(cut, 3)
+            if c['start'] < p['end'] - tol:               # 前句已到最短仍重叠 → 后句后推
+                c['start'] = round(p['end'], 3)
+        if c['end'] - c['start'] < min_dur:               # 塌缩句兜底
+            c['end'] = round(c['start'] + min_dur, 3)
+    return sents
 
 
 class ASR:
@@ -263,7 +296,19 @@ class ASR:
     def _mimo_recognize(self, wav_path):
         import base64
         import subprocess
-        model = (self.cfg.get('mimoAsrModel') or 'mimo-v2.5-asr').strip()
+        model = (self.cfg.get('mimoAsrModel') or '').strip()
+        # MiMo V2.5 已于 2026-10-21 下线：不再默认拿死模型去打请求
+        try:
+            import speech_providers as _spv
+            retired = {str(x).lower() for x in getattr(_spv, 'MIMO_RETIRED_MODELS', set())}
+            if not model or model.lower() in retired:
+                raise RuntimeError(getattr(_spv, 'MIMO_RETIRED_NOTE',
+                                           'MiMo V2.5 已下线，请改用 paraformer-realtime-v2'))
+        except RuntimeError:
+            raise
+        except Exception:
+            if not model:
+                raise RuntimeError('MiMo ASR 模型未配置（V2.5 已下线，请改用 paraformer-realtime-v2）')
         self._say(f'MiMo 识别中…（{model}）')
         audio_path = Path(wav_path)
         fmt = 'wav'
@@ -414,8 +459,12 @@ class ASR:
         is_omni = 'omni' in model.lower()
         wav = Path(wav_path)
         if wav.stat().st_size > 10 * 1024 * 1024:
-            raise RuntimeError('文件转写型模型单次上限 10MB/约 5 分钟：请用「分片并行」转写模式'
-                               '（会自动按静音切成 4 分钟片段），或换 paraformer')
+            # 正常路径永不走到这里：videosrc.plan_asr_route 会先把长音频改道
+            # recognize_parallel（4 分钟静音切片）。命中说明调用方**绕过了统一路由**
+            # 直接 recognize 整段——报错里明说，便于定位绕行入口（#6 审计用）。
+            raise RuntimeError('这段音频超过文件转写型模型的单次上限（10MB/约 5 分钟），'
+                               '且该入口没走自动分片（recognize_parallel）。'
+                               '请改走 videosrc._asr_to_cues，或换 paraformer')
         b64 = base64.b64encode(wav.read_bytes()).decode()
         content = [{'type': 'input_audio',
                     'input_audio': {'data': f'data:audio/wav;base64,{b64}'}}]
@@ -463,11 +512,16 @@ class ASR:
             sents.append({'text': p, 'start': round(t, 3), 'end': round(t + d, 3)})
             t += d
         if sents and dur > 0:
-            # 以真实音频时长为锚整体缩放，避免插值总长严重偏离
+            # 以真实音频时长为锚整体缩放：k = 真实时长 / 插值总长，本质是"静音占比"
+            # 的补偿系数。旧版只在 0.5<k<2.0 时缩放——94 分钟长音频静音多，k 常 >2，
+            # 反而**完全不缩放** → 全部字幕挤在音频前 1/3，越往后越对不上
+            # （#1「音频与句子不同步」的根因之一）。现在一律按 k 缩放，只把 k 夹在
+            # [0.5, 8.0] 防坏数值；缩放后末句 end ≈ 真实时长。
             k = dur / max(t, 0.001)
-            if 0.5 < k < 2.0:
-                sents = [{'text': s['text'], 'start': round(s['start'] * k, 3),
-                          'end': round(s['end'] * k, 3)} for s in sents]
+            k = min(max(k, 0.5), 8.0)
+            sents = [{'text': s['text'], 'start': round(s['start'] * k, 3),
+                      'end': round(s['end'] * k, 3)} for s in sents]
+            self._say(f'无词级时间戳：按 {k:.2f}× 把插值时间轴锚到真实时长 {dur:.1f}s')
         return {'text': text, 'words': [], 'sentences': sents}
 
     # ---------- 热词绑定（预编译词表 vocabulary_id：免费，target_model 须与识别模型一致）
@@ -483,10 +537,11 @@ class ASR:
     def recognize_parallel(self, wav_path, language='en', workers=4, log=None):
         """分片并行转写：沿静音点切 3~5 分钟片段，多路并发 recognize，按偏移合并。
 
-        提速约 min(workers, 片数) 倍；某片被限流时自动串行重试一次。
-        返回结构与 recognize 相同。
+        提速约 min(workers, 片数) 倍。**局部失败不许拖垮整体**：单片失败错峰串行
+        重试一次 → 仍失败按半长重切再试两轮（下界 90s）→ 全部失败才整段回退
+        paraformer（带逐词时间戳）。返回结构与 recognize 相同。
         """
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import subprocess as _sp
         import tedlibrarian as _tl
         wav_path = Path(wav_path)
@@ -525,34 +580,81 @@ class ASR:
         if log:
             log(f'切成 {len(bounds)} 片并行转写（{workers} 路并发）')
 
-        # ③ 并发识别（失败片错峰串行重试一次——限流降级）
+        # ③ 并发识别：任何单片的失败都不许拖垮整体（旧版用 ex.map，一片抛错就整轮
+        #    抛异常 = 「长音频直接失败」的另一半根因）。降级链：
+        #    单片失败 → 错峰串行重试一次 → 仍失败 → 该片对半重切再试（两轮，下界 90s）
+        #    → 仍有片缺失但其余成功 → 用成功的片合并（日志记缺口）
+        #    → 全部失败 → 整段回退 paraformer（逐词时间戳、单次 5 小时）
         # 切片放系统临时目录：绝不落语料目录（避免被扫成重复语料）
         import tempfile
         tmpdir = Path(tempfile.mkdtemp(prefix='ted_parts_'))
-        try:
-            def do(i):
-                s0, s1 = bounds[i]
-                part = tmpdir / f'p{i:03d}.wav'
-                if not part.exists():
-                    c = _sp.run([_tl.FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
-                                 '-ss', f'{s0:.3f}', '-to', f'{s1:.3f}', '-i', str(wav_path),
-                                 '-ac', '1', '-ar', '16000', str(part)],
-                                capture_output=True,
-                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                    if c.returncode != 0 or not part.exists():
-                        raise RuntimeError(f'切片 {i} 失败')
-                try:
-                    return i, self.recognize(part, language)
-                except Exception as e:
-                    if log:
-                        log(f'片段 {i} 失败（{str(e)[:60]}），稍后串行重试')
-                    time.sleep(2.0 * (i + 1))          # 错峰，避开限流窗口
-                    return i, self.recognize(part, language)
 
-            results = [None] * len(bounds)
+        def cut(i, s0, s1):
+            part = tmpdir / f'p{i:03d}_{int(max(0.0, s1 - s0)):04d}.wav'
+            if not part.exists():
+                c = _sp.run([_tl.FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
+                             '-ss', f'{s0:.3f}', '-to', f'{s1:.3f}', '-i', str(wav_path),
+                             '-ac', '1', '-ar', '16000', str(part)],
+                            capture_output=True,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                if c.returncode != 0 or not part.exists():
+                    raise RuntimeError(f'切片 {i} 失败')
+            return part
+
+        def do(i, s0=None, s1=None):
+            a, b = bounds[i]
+            s0 = a if s0 is None else s0
+            s1 = b if s1 is None else s1
+            part = cut(i, s0, s1)
+            try:
+                return i, self.recognize(part, language), (s0, s1)
+            except Exception as e:
+                if log:
+                    log(f'片段 {i} 失败（{str(e)[:60]}），稍后串行重试')
+                time.sleep(2.0 * (i + 1))          # 错峰，避开限流窗口
+                return i, self.recognize(part, language), (s0, s1)
+
+        results = [None] * len(bounds)
+        failed = {}
+        try:
             with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
-                for i, res in ex.map(do, range(len(bounds))):
-                    results[i] = res
+                futs = {ex.submit(do, i): i for i in range(len(bounds))}
+                for fu in as_completed(futs):
+                    i = futs[fu]
+                    try:
+                        _k, res, seg = fu.result()
+                        results[i] = res
+                        bounds[i] = seg             # 半长重切后以实际切点为准
+                    except Exception as e:
+                        failed[i] = str(e)[:80]
+                        if log:
+                            log(f'片段 {i} 重试后仍失败（{str(e)[:60]}），转半长重切')
+
+            # 降级：失败片对半重切再试（最多两轮；单片已不足 90s 不再细分）
+            for _round in range(2):
+                if not failed:
+                    break
+                retry, failed = failed, {}
+                for i, why in retry.items():
+                    a, b = bounds[i]
+                    if b - a < 90.0:
+                        failed[i] = why
+                        if log:
+                            log(f'片段 {i} 仅 {b - a:.0f}s，不再细分：{why}')
+                        continue
+                    mid = (a + b) / 2.0
+                    for x, y in ((a, min(b, mid + 0.75)), (max(a, mid - 0.75), b)):
+                        idx = len(bounds)
+                        bounds.append((x, y))
+                        results.append(None)
+                        try:
+                            _k, res, seg = do(idx, x, y)
+                            results[idx] = res
+                            bounds[idx] = seg
+                        except Exception as e:
+                            failed[idx] = str(e)[:80]
+                            if log:
+                                log(f'半片子片 {idx} 失败（{str(e)[:50]}）')
         finally:
             import shutil as _sh
             _sh.rmtree(tmpdir, ignore_errors=True)
@@ -560,12 +662,32 @@ class ASR:
         # ④ 合并（v2，治交错重复的根）：绝对时间排序 + 邻域内按词集相似度判重，
         # 保更完整的一版。旧版按 (start,text) 精确键去重——两片把同一句识别成
         # 不同断句（半句 vs 全句）时键不同 → 双双保留 → A-A-B-A-C 交错（67集事故）。
-        merged = _merge_part_sentences(bounds, results)
-        if not merged:
-            raise RuntimeError('并行转写结果为空')
+        merged = _merge_part_sentences(bounds, results) if any(results) else []
+        if not merged:                  # 全部失败 → 绝不整体爆炸，整段回退 paraformer
+            if log:
+                log('各分片均失败，回退 paraformer-realtime-v2 整段转写（带逐词时间戳）')
+            merged = self._paraformer_fallback_sentences(wav_path, language, log)
         if log:
             log(f'合并完成：{len(merged)} 句')
         return {'text': ' '.join(m['text'] for m in merged), 'words': [], 'sentences': merged}
+
+    def _paraformer_fallback_sentences(self, wav_path, language='en', log=None):
+        """分片全败时的整段兜底：临时把 asrModel 换成 paraformer-realtime-v2 跑一次
+        _dashscope_recognize（单次可达 5 小时、带逐词时间戳），**不改用户配置**。"""
+        old = self.cfg.get('asrModel')
+        try:
+            self.cfg['asrModel'] = 'paraformer-realtime-v2'
+            res = self._dashscope_recognize(wav_path, language)
+            if log:
+                log('paraformer 兜底成功：%d 句' % len(res.get('sentences') or []))
+            return res.get('sentences') or []
+        except Exception as e:
+            raise RuntimeError('分片转写与 paraformer 兜底均失败：' + str(e)[:120])
+        finally:
+            if old is None:
+                self.cfg.pop('asrModel', None)
+            else:
+                self.cfg['asrModel'] = old
 
     def recognize_gummy(self, wav_path, log=None):
         """Gummy 一体模式：转写+翻译一步出（DashScope gummy-realtime-v1）。

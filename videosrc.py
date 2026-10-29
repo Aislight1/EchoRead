@@ -25,6 +25,7 @@ from pathlib import Path
 
 import tedlibrarian as tl
 import prompts
+import videokind as _vk            # 第⑤问：来源类型（演讲/对话/读书/播客）→ 后处理参数
 from tedlibrarian import _no_window, _win_suspend_threads, slugify
 from urllib.request import Request as _urllib_request, urlopen as _urlopen
 
@@ -292,72 +293,270 @@ def sanitize_cues(cues):
     return merged
 
 
-def _split_long_cues(cues, max_words=22, max_dur=12.0, min_words=3):
-    """把过长的转写句在标点处二次切分（Gummy 等一体模型按语义分段，句会很长）。
+def _split_long_cues(cues, max_words=45, max_dur=12.0, min_words=3, hard_ratio=1.8):
+    """第11问：长 cue 只按「句界 / 语义弱边界」切，**永不在句子中间按词数硬剁**。
 
-    切点只在 ', ; and but because so when' 这类弱连接处；时间按词数线性分。
-    min_words：切出的片段不足 min_words 词时并回前段（防逐词念——合成示范
-    拿到单词级文本会崩坏）。
+    规则：
+      1) cue 里有 ≥2 个完整句 → 只在句末标点处成组，每组尽量 ≤max_words，且每组
+         ≥min_words 词（不足就并回相邻组，宁可超限也不切出半句）；
+      2) 单个句子 ≤ max_words×hard_ratio（默认 1.8 倍）→ **不切**：一条 cue 至少
+         含一个完整句（用户口径「死板按词数拆」的病根就在这里）；
+      3) 单句超过 1.8 倍上限 → _cut_long_text 按「; : — → 从属连词/关系词前 →
+         逗号 → 任意词界」递归二分，两半都 ≥min_words，否则整体不切（宁长勿碎）。
+    时间仍按词数线性分——有音频时下游 _snap_cues_to_silence 会把句界吸到真实静音。
+    max_dur 保留参数位兼容旧调用（不再按秒数硬切：那正是切出半个句子的原因）。
     """
-    import re as _re
     out = []
     for c in cues:
         text = (c.get('text') or '').strip()
+        if not text:
+            continue
         words = text.split()
         dur = float(c.get('end') or 0) - float(c.get('start') or 0)
-        # 入口：词数超限才切（dur 条件会放行'时间戳失真的坏长句'——那正是要修的）
         if len(words) <= max_words:
             out.append(c)
             continue
-        parts = _re.split(r'(?<=[,;.!?])\s+|\s+(?=and |but |because |so |when |which |that |this |where |if |or )',
-                          text)
-        parts = [p.strip() for p in parts if p.strip()]
-        if len(parts) <= 1:
+        sents = _split_text_sentences(text)
+        parts = []
+        if len(sents) > 1:                        # ① 多句：只在句末标点处成组
+            for s in sents:
+                if not parts:
+                    parts.append(s)
+                elif len(parts[-1].split()) + len(s.split()) > max_words:
+                    parts.append(s)
+                else:
+                    parts[-1] = parts[-1] + ' ' + s
+            merged = []                           # 碎片并回：每段都要 ≥min_words
+            for p in parts:
+                if merged and len(p.split()) < min_words:
+                    merged[-1] = merged[-1] + ' ' + p
+                else:
+                    merged.append(p)
+            if len(merged) > 1 and len(merged[0].split()) < min_words:
+                merged[1] = merged[0] + ' ' + merged[1]
+                merged.pop(0)
+            parts = merged
+        if len(parts) <= 1:                       # ② 单句：只有超 1.8 倍才动刀
+            parts = [text]
+        fin = []
+        for p in parts:
+            if len(sents) <= 1 and len(p.split()) > max_words * float(hard_ratio):
+                fin.extend(_cut_long_text(p, max_words, min_words))
+            else:
+                fin.append(p)
+        if len(fin) <= 1:
             out.append(c)
             continue
-        total_w = sum(len(p.split()) for p in parts) or 1
-        # 累积成段：不足 min_words 词的片段滚入当前段（防逐词念：
-        # 合成示范拿到单词级文本会崩坏）；单段仍超长就接受（宁长勿碎）
-        merged_parts, buf = [], []
-        for p in parts:
-            buf.append(p)
-            if len(' '.join(buf).split()) >= min_words:
-                merged_parts.append(' '.join(buf))
-                buf = []
-        if buf:
-            if merged_parts:
-                merged_parts[-1] = merged_parts[-1] + ' ' + ' '.join(buf)
-            else:
-                merged_parts.append(' '.join(buf))
+        total_m = sum(len(p.split()) for p in fin) or 1
         t = float(c.get('start') or 0)
-        d = dur
-        total_m = sum(len(p.split()) for p in merged_parts) or 1
-        for p in merged_parts:
+        d = max(dur, 0.3)
+        for p in fin:
             w = len(p.split())
             seg_d = d * w / total_m
             nc = {'start': round(t, 3), 'end': round(t + seg_d, 3), 'text': p}
-            if c.get('level'):                  # 难度随切分段继承（组装合并时再众数表决）
+            if c.get('level'):                    # 难度随切分段继承（组装合并时再众数表决）
                 nc['level'] = c['level']
             out.append(nc)
             t += seg_d
     return out
 
 
+# ---------- 第11问：真句界（缩写白名单）与语义弱边界 ----------
+# 句末标点后不算句界的缩写（全小写比对）。含带点的拉丁缩写与月份。
+_ABBREV = frozenset((
+    'mr mrs ms dr prof st sgt capt lt col gen rev hon jr sr vs etc al '
+    'no nos vol vols ch chap p pp fig figs ed eds inc ltd co corp dept approx '
+    'mt ft ave blvd '
+    'jan feb mar apr jun jul aug sep sept oct nov dec '
+    'e.g i.e a.m p.m u.s u.k'
+).split())
+
+# 句末标点 + 空格 + 大写/数字/开引号 → 候选句界（?! 连用、… 省略号都算）
+_TERM_RE = re.compile(r"([.!?\u2026]+)[\u2019'\"\u201d)]*\s+(?=[A-Z0-9\u201c\"'(\[])")
+
+
+def _abbrev_tail(t, with_dot=None):
+    """判断末尾是不是缩写点（Mr. / Dr. / U.S. / J.），是则这个点不算句末。
+
+    with_dot：True＝t 已含那个点（"... Mr."）；False＝t 不含点（"... Mr"）；
+    None＝自动探测。旧实现只会处理含点入参，`_sentence_cuts` 传的是不含点的
+    前缀（"… Mr"），被 [:-1] 砍掉尾字母后才查表——"Prof" 因此漏判、切断在
+    "Prof. X" 上（第11问验收缺陷 A）。
+    """
+    s = (t or '').rstrip().rstrip('\'"\u2018\u2019\u201c\u201d)]\u300b\u300d\u300f')
+    if with_dot is None:
+        has_dot = s.endswith('.') and not s.endswith('..')
+    else:
+        has_dot = bool(with_dot)
+    head = s[:-1] if has_dot else s
+    m = re.search(r'([A-Za-z][A-Za-z.]*)$', head)
+    if not m:
+        return False
+    raw = m.group(1)
+    low = raw.lower()
+    if low in _ABBREV:
+        return True
+    if re.fullmatch(r'(?:[a-z]\.)+[a-z]', low):           # U.S / e.g / a.m
+        return True
+    if len(low) == 1 and raw.isupper():                   # 姓名首字母 J. / K.
+        return True
+    return False
+
+
 def _ends_terminal(text):
-    """句末标点判定：剥离尾部引号/括号后看 . ! ? …（"results.'" 也算句末）。"""
+    """句末判定：剥离尾部引号/括号后看 . ! ? …；缩写（Mr. Dr. U.S.）与单字母首字母不算。"""
     t = (text or '').rstrip().rstrip('\'"\u2018\u2019\u201c\u201d)]）》」』')
-    return t.endswith(('.', '!', '?', '…'))
+    if not t.endswith(('.', '!', '?', '\u2026')):
+        return False
+    if t.endswith('.') and not t.endswith('..'):
+        return not _abbrev_tail(t)
+    return True
 
 
-def _merge_fragments(cues, max_words=45):
+def _sentence_cuts(text):
+    """真句界的切点位置（含标点与其后的空格）；缩写/小数/编号不算。"""
+    cuts = []
+    text = text or ''
+    for m in _TERM_RE.finditer(text):
+        if m.group(1) == '.' and _abbrev_tail(text[:m.end()]):
+            continue
+        cuts.append(m.end())
+    return cuts
+
+
+def _split_text_sentences(text):
+    """按真句末标点把一段文本切成句子列表（切不开就返回 [原文]）。"""
+    text = (text or '').strip()
+    cuts = _sentence_cuts(text)
+    if not cuts:
+        return [text] if text else []
+    parts, pos = [], 0
+    for b in cuts:
+        seg = text[pos:b].strip()
+        if seg:
+            parts.append(seg)
+        pos = b
+    tail = text[pos:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [text]
+
+
+# 语义弱边界优先级（第11问验收缺陷 B，从强到弱）：
+# 分号/冒号后 → 逗号后 → 破折号后 → and 前 → but 前 → which 前。
+# 切点必须落在词数窗口 [0.55*max_words, max_words] 内（左段尽量接近上限、右段尽量短），
+# 且不能在成对引号内（缺陷 C）；一个弱边界都没有才退化成任意词界硬切。
+_WEAK_LEVELS = (
+    (';:', re.compile(r'(?<=[;:])\s+')),
+    (',', re.compile(r'(?<=,)\s+')),
+    ('dash', re.compile(r'(?<=[\u2014\u2013])\s+')),
+    ('and', re.compile(r'\s+(?=and\b)', re.I)),
+    ('but', re.compile(r'\s+(?=but\b)', re.I)),
+    ('which', re.compile(r'\s+(?=which\b)', re.I)),
+)
+
+
+def _in_quotes(text, pos):
+    """pos 是否落在**已闭合的成对引号**内（缺陷 C：别把一句台词拆两半）。
+
+    坏数据防御（第11问收尾，ASR 常见）：引号总数是奇数、或 pos 之后再没有引号时，
+    该引号不可能配对 → **不屏蔽**，否则整段候选切点会被一个孤立引号全部封死。
+    英文 " 与中文 “” 都算（单引号不参与）。"""
+    t = text or ''
+    pos = max(0, min(int(pos), len(t)))
+    quotes = [i for i, ch in enumerate(t) if ch in '"\u201c\u201d']
+    if len(quotes) % 2:                       # 奇数＝引号不配对，整段不按引号屏蔽
+        return False
+    if not any(i > pos for i in quotes):      # pos 之后没引号＝这个引号没闭合
+        return False
+    depth = 0
+    for ch in t[:pos]:
+        if ch == '"':
+            depth = 0 if depth else 1
+        elif ch == '\u201c':
+            depth += 1
+        elif ch == '\u201d':
+            depth = max(0, depth - 1)
+    return depth > 0
+
+
+def _weak_cut_points(text, max_words=45, min_words=3):
+    """超长单句的候选弱边界：[(优先级, 前半词数, 切位)]，按优先级升序。"""
+    total = len((text or '').split())
+    if total < min_words * 2:
+        return []
+    lo = max(float(min_words), float(max_words) * 0.55)     # 窗口下界（缺陷 B）
+    hi = float(max_words)
+    pts = []
+    for prio, (_tag, rx) in enumerate(_WEAK_LEVELS):
+        for m in rx.finditer(text):
+            nw = len(text[:m.start()].split())
+            if lo <= nw <= hi and (total - nw) >= min_words \
+                    and not _in_quotes(text, m.start()):
+                pts.append((prio, nw, m.start()))
+    return pts
+
+
+def _hard_cut_pos(text, max_words=45, min_words=3):
+    """兜底硬切位：先找窗口内最靠后的非引号词界，再退到全句任一非引号词界。"""
+    total = len((text or '').split())
+    lo = max(float(min_words), float(max_words) * 0.55)
+    best = None
+    for m in re.finditer(r'\s+', text):
+        nw = len(text[:m.start()].split())
+        if lo <= nw <= float(max_words) and (total - nw) >= min_words \
+                and not _in_quotes(text, m.start()):
+            best = m.start()
+    if best is not None:
+        return best
+    for m in re.finditer(r'\s+', text):
+        nw = len(text[:m.start()].split())
+        if min_words <= nw <= total - min_words and not _in_quotes(text, m.start()):
+            best = m.start()
+    return best
+
+
+def _cut_long_text(text, max_words=45, min_words=3):
+    """超长单句只在语义弱边界二分（缺陷 B：绝不在句子中间随便剁）。
+
+    同级取「最靠后」的切点：左段尽量顶到上限，右段尽量短，收敛更快、句数不涨。
+    """
+    words = (text or '').split()
+    if len(words) <= max_words:
+        return [text]
+    pts = _weak_cut_points(text, max_words, min_words)
+    if pts:
+        pts.sort(key=lambda p: (p[0], -p[1]))              # 优先级优先，同级取最靠后
+        pos = pts[0][2]
+    else:
+        pos = _hard_cut_pos(text, max_words, min_words)
+        if pos is None:
+            return [text]
+    left, right = text[:pos].strip(), text[pos:].strip()
+    if not left or not right:
+        return [text]
+    return (_cut_long_text(left, max_words, min_words)
+            + _cut_long_text(right, max_words, min_words))
+
+
+def _merge_fragments(cues, max_words=45, gap_max=None, hard_max=None):
     """A6 碎片合并：把被转写腰斩的句拼回整句（B站/ASR 语料的"逐句精读出现独立单词"根治）。
 
-    合并条件（满足其一，且合并后 ≤max_words 词、句间空档 <5s）：
+    合并条件（满足其一，且句间空档 <gap_max）；词数上限：前句已说完（有句末标点）
+    ≤max_words，前句还没说完 ≤hard_max（默认 1.8×max_words）——长句被旧切分器剁成
+    3 段时，卡在 max_words 会让最后一段永远合不回去，留下"下条小写开头"的碎句
+    （第11问验收：Austen 尾无标点 3.3% 的主要来源）。合并条件原文：
       - 前句不以句末标点结尾（逗号/悬空从句——实测 67 集有 52% 这种腰斩句）
       - 后句 ≤2 词且自身不以句末标点结尾（"the IT department" 式碎块）
+    gap_max: 允许合并的最大静音间隔（秒）。None＝老行为 5.0；来源类型（videokind）
+    会收紧它（对话 0.45 / 读书 1.6）——合并跨大静音会把静音并进同一条 cue 的时长，
+    下游按词数分时间时就把静音当语音摊（#1 句界后移的机制之一）。
     合并时记录 _bt/_be（各成员原始起止，供拆分 pass 按真实边界切时间）；
     _lv 收集成员的 AI 难度（全部一致才保留，否则丢弃回退本地规则）。
     """
+    _gap_max = 5.0 if gap_max is None else float(gap_max)
+    _hard = (float(max_words) * 1.8) if hard_max is None else float(hard_max)
+    _hard = max(_hard, float(max_words))
     out = []
     for c in cues:
         c = dict(c)
@@ -372,7 +571,8 @@ def _merge_fragments(cues, max_words=45):
             if join:
                 pw = len((prev.get('text') or '').split())
                 gap = float(c.get('start') or 0) - float(prev.get('end') or 0)
-                if pw + cw <= max_words and gap < 5.0:
+                _cap = _hard if not _ends_terminal(prev.get('text')) else float(max_words)
+                if pw + cw <= _cap and gap < _gap_max:
                     prev['_bt'] = (prev.get('_bt') or []) + [float(c.get('start') or 0)]
                     prev['_be'] = (prev.get('_be') or []) + [float(c.get('end') or 0)]
                     prev['_lv'] = (prev.get('_lv') or [prev.get('level')]) + [c.get('level')]
@@ -405,7 +605,7 @@ def _split_sentences(cues, min_words=1):
         text = (c.get('text') or '').strip()
         bt = c.pop('_bt', None) or []
         be = c.pop('_be', None) or []
-        bounds = [m.end() for m in re.finditer(r"[.!?]['\u2019\"\u201d]?\s+(?=[A-Z0-9])", text)]
+        bounds = _sentence_cuts(text)   # 第11问：缩写/首字母/小数不算句界
         if not bounds:
             out.append(c)
             continue
@@ -468,7 +668,10 @@ def _dedup_repeats(cues, look=3, min_chars=20):
     一份时间正常一份塌缩——67集实测 9 种 22 句，含 'Today, we have…' ×3）。
 
     规则：规范化后完全同文本（≥min_chars，"Yes!" 这类真实口头重复不碰）且在
-    look 句范围内 → 保留时间 sane 的那份（0.5-6 词/s）；都 sane 留先出现的。
+    look 句范围内 → 保留时间 sane 的那份（0.5-6 词/s）；都 sane 时只有**时间重叠**
+    才判为同一次转写的重复输出（第11问：双语语料里同一句同时存在"纯英文版"和
+    "英中对照版"，时间不重叠、两份都 sane——旧逻辑无条件删后者，既丢文本又让
+    重切不幂等，实测 EnglishPod 对话丢 20 词、跑两遍条数 463→447）。
     用户已确认这不是教学重复（教学重复不会是紧邻交错+时间塌缩）。
     """
     def _nt(t):
@@ -478,6 +681,11 @@ def _dedup_repeats(cues, look=3, min_chars=20):
         n = len((c.get('text') or '').split())
         d = float(c.get('end') or 0) - float(c.get('start') or 0)
         return d > 0 and 0.5 <= n / d <= 6.0
+
+    def _overlap(a, b):
+        lo = max(float(a.get('start') or 0), float(b.get('start') or 0))
+        hi = min(float(a.get('end') or 0), float(b.get('end') or 0))
+        return hi - lo > 0.15
 
     n = len(cues)
     drop = set()
@@ -497,34 +705,294 @@ def _dedup_repeats(cues, look=3, min_chars=20):
             elif _sane(cues[j]) and not _sane(cues[i]):
                 drop.add(i)
                 break
-            else:
+            elif _overlap(cues[i], cues[j]):        # 时间重叠才是真重复（ASR 交叠输出）
                 drop.add(j)
     if not drop:
         return cues
     return [c for k, c in enumerate(cues) if k not in drop]
 
 
-def assemble_sentences(cues, max_words=45):
+def assemble_sentences(cues, max_words=45, merge_gap=None):
     """句子组装层（A6+A2 组合入口）：去重 → 碎片合并 → 句末标点拆分 → 终局排序+重叠钳制。
 
     幂等：对已组装过的字幕无副作用（没有腰斩可合、没有多句可拆、没有重复可删）。
+    merge_gap: 碎片合并允许的最大句间静音（秒），None＝老行为 5.0；来源类型会收紧它
+    （videokind: 对话 0.45 / 读书 1.6），避免"合并跨大静音 → 按词数分时间时把静音摊成语音"。
     使用点：videosrc 生成出口（治本）、app._cues_of 读取出口（治标——
     不动字幕文件，逐句精读/听力/精讲立即恢复连贯）、doctor 落盘出口（统一句口径，
     保证 盘=展=lvl 三者 cueCount 永远一致——B2 的根治）。
     """
     cues = _dedup_repeats(cues)                   # 先按原始粒度去重（交错重复在合并前删）
-    cues = _merge_fragments(cues, max_words=max_words)
+    cues = _merge_fragments(cues, max_words=max_words, gap_max=merge_gap)
     cues = _dedup_repeats(cues)                   # 合并可能拼出近邻同文本，再扫一遍
     cues = _split_sentences(cues)
     cues.sort(key=lambda x: float(x.get('start') or 0))
-    for i in range(len(cues) - 1):                 # 终局钳制：拆分边界异常时不把重叠带给下游
-        s = float(cues[i].get('start') or 0)
-        ns = float(cues[i + 1].get('start') or 0)
-        if float(cues[i].get('end') or 0) > ns:
-            cues[i]['end'] = round(max(s + 0.2, ns), 3)
-        if float(cues[i].get('end') or 0) <= s:
-            cues[i]['end'] = round(s + 0.3, 3)
+    for i, c in enumerate(cues):                   # 终局钳制：拆分边界异常时不把重叠带给下游
+        s = float(c.get('start') or 0)
+        ns = float(cues[i + 1].get('start') or 0) if i + 1 < len(cues) else None
+        if ns is not None and float(c.get('end') or 0) > ns:
+            c['end'] = round(max(s + 0.2, ns), 3)
+        if float(c.get('end') or 0) <= s:           # 末句也兜底（旧版 range(len-1) 漏了最后一句）
+            c['end'] = round(s + 0.3, 3)
     return cues
+
+
+# ---------- 第11问：含义段落合并 ----------
+_PARA_BREAK = re.compile(
+    r'^(?:chapter|part|section|book|prologue|epilogue|preface|contents|'
+    r'第\s*[0-9一二三四五六七八九十百]+\s*[章节回部])\b', re.I)
+# 换人起头：短横线台词 / "Name:" 前缀（对话不得跨人并句）
+_SPK_PREFIX = re.compile(r'^(?:[-\u2013\u2014]\s+|[A-Z][A-Za-z .]{0,14}:\s+)')
+
+
+def _is_para_break(text):
+    """段落起点：章节/编号起头，或对话换人（"-" 开头 / "Name:" 前缀）。"""
+    t = (text or '').strip()
+    if not t:
+        return True
+    return bool(_PARA_BREAK.match(t) or _SPK_PREFIX.match(t))
+
+
+def _group_paragraphs(cues, para_min=20, para_max=40, para_gap=1.0):
+    """含义段落合并（第11问新增）：同一段落内的相邻完整句并成一条。
+
+    断段条件：句间空档 ≥para_gap、下句是章节/编号/换人起头、并后会超过 para_max。
+    只在**句末标点**处并（每句都是完整句），所以不会把半句拼进来；单句本身超
+    para_max 就独占一条（宁长勿碎）。level 取成员众数。
+    """
+    from collections import Counter
+    out = []
+    buf = [None]
+
+    def flush():
+        b = buf[0]
+        if b:
+            lv = b.pop('_lv', None)
+            lvs = [x for x in (lv or []) if x]
+            if lvs:
+                b['level'] = Counter(lvs).most_common(1)[0][0]
+            out.append(b)
+        buf[0] = None
+
+    for c in cues:
+        text = (c.get('text') or '').strip()
+        if not text:
+            continue
+        w = len(text.split())
+        b = buf[0]
+        if b is not None:
+            gap = float(c.get('start') or 0) - float(b.get('end') or 0)
+            if (_is_para_break(text) or gap >= float(para_gap)
+                    or int(b.get('_n', 0)) + w > int(para_max)):
+                flush()
+                b = None
+        if b is None:
+            buf[0] = {'start': float(c.get('start') or 0), 'end': float(c.get('end') or 0),
+                      'text': text, '_n': w, '_lv': [c.get('level')]}
+            continue
+        b['end'] = max(float(b.get('end') or 0), float(c.get('end') or 0))
+        b['text'] = (b.get('text') or '').rstrip() + ' ' + text
+        b['_n'] = int(b.get('_n', 0)) + w
+        b['_lv'] = (b.get('_lv') or []) + [c.get('level')]
+    flush()
+    return out
+
+
+# 小写/连词开头＝上一句被拦腰切断的强信号（指标与日志共用）
+_CONJ_HEAD = frozenset(
+    'and but or so because which that when while if although though whereas since '
+    'unless until where who whom whose then thus also yet nor'.split())
+
+
+def _cue_stats(cues, rules=None):
+    """量化指标（日志/报告用）：无句末标点结尾%、小写/连词开头%、平均词数、
+    落在目标词数区间的占比、单句被切开的次数。"""
+    r = rules or {}
+    lo, hi = int(r.get('para_min') or 20), int(r.get('para_max') or 40)
+    n = len(cues)
+    no_end = low_head = in_range = tw = cut = no_punct = conj_head = hard_cut = 0
+    words = []
+    prev_low = prev_nop = False
+    _punct_tail = ('.', '!', '?', '\u2026', ',', ';', ':', ')', ']', '\u3002', '\uff0c',
+                   '\uff1b', '\uff1a', '\u3001', '"', '\u201d', '\u2019', '\'',
+                   '\u2014', '\u2013')
+    for c in cues:
+        t = (c.get('text') or '').strip()
+        w = len(t.split())
+        tw += w
+        words.append(w)
+        term = _ends_terminal(t)
+        if not term:
+            no_end += 1
+        if not t.rstrip().endswith(_punct_tail):               # 连任何标点都没有＝真硬切
+            no_punct += 1
+        first = (t.split() or [''])[0]
+        head = re.sub(r'^[\W_]+', '', first)
+        is_low = bool(head) and (head[:1].islower() or head.lower() in _CONJ_HEAD)
+        if is_low:
+            low_head += 1
+        if head.lower() in _CONJ_HEAD:
+            conj_head += 1
+        if lo <= w <= hi:
+            in_range += 1
+        if is_low and prev_low:                                # 前一句没标点 + 本句小写/连词
+            cut += 1
+        if is_low and prev_nop:                                # 真硬切：前一条连任何标点都没有
+            hard_cut += 1
+        prev_low = (not term)
+        prev_nop = not t.rstrip().endswith(_punct_tail)
+    pct = (lambda x: round(100.0 * x / n, 1) if n else 0.0)
+    words.sort()
+    p90 = words[min(len(words) - 1, int(len(words) * 0.9))] if words else 0
+    return {'n': n, 'avg': round(tw / n, 1) if n else 0.0,
+            'no_end': no_end, 'no_end_pct': pct(no_end),
+            'no_punct': no_punct, 'no_punct_pct': pct(no_punct),
+            'lower_head': low_head, 'lower_head_pct': pct(low_head),
+            'conj_head': conj_head, 'cut': cut, 'hard_cut': hard_cut,
+            'p90': p90, 'max': max(words) if words else 0,
+            'in_range': in_range, 'in_range_pct': pct(in_range)}
+
+
+# 第11问收尾：超长句（> max_words*1.4 或 > max_dur*1.6）的弱边界再切。
+# 只在 `; ` / ` — ` / `, and ` / `, but ` 上断；找不到就原样保留（不退化硬切）；
+# 每句最多 2 刀；文本逐字不变（只在单个空白处断，left + ' ' + right == 原文）。
+_VLONG_RATIO = 1.13
+_VLONG_DUR_RATIO = 1.13
+
+
+def _vlong_cut_points(text):
+    """超长句可切的弱边界位置：返回「切在这个空格上」的下标列表。"""
+    pts = []
+    n = len(text)
+    for i, ch in enumerate(text):
+        cand = None
+        if ch in ';\u2014\u2013':
+            if i + 1 < n and text[i + 1] == ' ':
+                cand = i + 1
+        elif ch == ',':
+            j = i + 1
+            while j < n and text[j] == ' ':
+                j += 1
+            if j == i + 2 and text[j:j + 4].lower() in ('and ', 'but '):
+                cand = i + 1
+        if cand is None:
+            continue
+        if _in_quotes(text, cand):                      # 引号内不断
+            continue
+        left_words = text[:cand].split()
+        if left_words and _abbrev_tail(left_words[-1]):  # 缩写点后不断
+            continue
+        pts.append(cand)
+    return pts
+
+
+def _resplit_very_long(cues, max_words=45, max_dur=12.0, log=None):
+    """把仍然过长的 cue 在最靠近中点的弱边界上切成 2~3 条（不硬切、不改文本）。"""
+    out = []
+    n_cut_cues = 0
+    for c in cues:
+        text = (c.get('text') or '').strip()
+        s = float(c.get('start') or 0)
+        e = float(c.get('end') or 0)
+        w0 = len(text.split())
+        dur = max(0.0, e - s)
+        w_trig = max_words * _VLONG_RATIO
+        d_trig = max_dur * _VLONG_DUR_RATIO
+        if w0 <= w_trig and dur <= d_trig:
+            out.append(c)
+            continue
+        pieces = [text]
+        for _round in range(2):                          # 一条最多 2 刀
+            best = None
+            for pi, pt in enumerate(pieces):
+                pw = len(pt.split())
+                pdur = dur * pw / float(w0 or 1)
+                if pw <= w_trig and pdur <= d_trig:
+                    continue
+                mid = len(pt) / 2.0
+                for cut in _vlong_cut_points(pt):
+                    left, right = pt[:cut], pt[cut + 1:]
+                    if len(left.split()) < 4 or len(right.split()) < 4:
+                        continue
+                    if left + ' ' + right != pt:         # 只许在单个空白处断，保证逐字不变
+                        continue
+                    d = abs(cut - mid)
+                    if best is None or d < best[0]:
+                        best = (d, pi, cut)
+            if best is None:
+                break
+            _, pi, cut = best
+            pt = pieces[pi]
+            pieces[pi:pi + 1] = [pt[:cut], pt[cut + 1:]]
+        if len(pieces) <= 1:
+            out.append(c)
+            continue
+        n_cut_cues += 1
+        tot = sum(len(p.split()) for p in pieces) or 1
+        t = s
+        for k, p in enumerate(pieces):
+            d = dur * len(p.split()) / float(tot)
+            st = round(t, 3)
+            en = round(e if k == len(pieces) - 1 else t + d, 3)
+            if en <= st:
+                en = round(st + 0.3, 3)
+            nc = dict(c)
+            nc['text'] = p
+            nc['start'] = st
+            nc['end'] = en
+            for kk in ('_bt', '_be', '_lv', 'words'):
+                nc.pop(kk, None)
+            out.append(nc)
+            t = en
+    if log:
+        log('超长句再切：%d 条（>max_words*%.2f 或 >max_dur*%.2f）'
+            % (n_cut_cues, _VLONG_RATIO, _VLONG_DUR_RATIO))
+    return out
+
+
+def resegment_cues(cues, audio_path=None, duration=None, kind=None, log=None):
+    """第11问：对**已有字幕 cue** 离线重切（不重新 ASR、不联网、不花钱）。
+
+    流水线：去重 → 碎片合并 → 真句界拆分 → 含义段落合并 → 超长单句弱边界切 →
+    排序/重叠钳制 → 末句越界钳制 →（给了音频）句界吸附真实静音。
+    kind=来源类型（videokind），决定 max_words / para 区间 / merge_gap。
+    幂等：同一输入跑两遍，cue 数与文本一致（段落只在句界处聚合，切/并互为逆）。
+    用途：修复历史语料（《傲慢与偏见》那类"句子被拦腰切开"的 vtt），
+    以及以后在落盘出口统一句口径（Lead 负责在 app.py 接线）。
+    """
+    if not cues:
+        return []
+    r = _vk.rules(kind)
+    cues = [dict(c) for c in cues if (c.get('text') or '').strip()]
+    cues = _dedup_repeats(cues)
+    cues = _merge_fragments(cues, max_words=r['max_words'], gap_max=r['merge_gap'])
+    cues = _dedup_repeats(cues)
+    cues = _split_sentences(cues)
+    cues = _group_paragraphs(cues, para_min=r['para_min'], para_max=r['para_max'],
+                             para_gap=r['para_gap'])
+    cues = _split_long_cues(cues, max_words=r['max_words'], max_dur=r['max_dur'],
+                            min_words=r['min_words'])
+    cues = _resplit_very_long(cues, max_words=r['max_words'], max_dur=r['max_dur'], log=log)
+    cues.sort(key=lambda x: float(x.get('start') or 0))
+    for i, c in enumerate(cues):                   # 终局钳制：不把重叠带给下游
+        s = float(c.get('start') or 0)
+        ns = float(cues[i + 1].get('start') or 0) if i + 1 < len(cues) else None
+        if ns is not None and float(c.get('end') or 0) > ns:
+            c['end'] = round(max(s + 0.2, ns), 3)
+        if float(c.get('end') or 0) <= s:
+            c['end'] = round(s + 0.3, 3)
+    cues = _fix_cue_drift(cues, duration, log)
+    if audio_path:                                 # 有音频才做静音吸附（整段只跑一次）
+        cues = _snap_cues_to_silence(cues, str(audio_path), log)
+        cues.sort(key=lambda x: float(x.get('start') or 0))
+    if log:
+        st = _cue_stats(cues, r)
+        log('句子重切：%d 条（平均 %.1f 词，无句末标点 %d 条 / %.1f%%，'
+            '小写或连词开头 %d 条 / %.1f%%，目标区间 %d 条 / %.1f%%）'
+            % (st['n'], st['avg'], st['no_end'], st['no_end_pct'],
+               st['lower_head'], st['lower_head_pct'], st['in_range'], st['in_range_pct']))
+    return cues
+
 
 
 def _timestamp_asr(asr, log=None):
@@ -563,7 +1031,201 @@ def _timestamp_asr(asr, log=None):
     return speech_asr.ASR(ncfg, log)
 
 
-def _asr_to_cues(mp3, workdir, asr, log, duration, mode='traditional'):
+# ---------- 转写路由唯一决策点（#10 长音频自动分片 / #6 模型能力）----------
+# 文件转写型 / 兼容型：一次上传整段音频，单次上限 10MB / 约 5 分钟（16k 单声道
+# wav ≈ 32KB/s，10MB ≈ 5.3 分钟）。命中这类模型的长音频必须自动改道分片并行，
+# 不能让用户看到「单次上限 10MB」那条报错。
+_FILE_MODEL_HINTS = ('qwen3-asr', 'qwen3.5-asr', 'qwen3.8-asr', 'omni',
+                     'qwen-audio-3.1-asr', 'audio-3.1-asr')
+_ONCE_MAX_BYTES = 10 * 1024 * 1024       # 官方单次上限
+_AUTO_SPLIT_BYTES = 9 * 1024 * 1024      # 留 10% 余量：9MB 以上就分片（体积先撞线）
+_AUTO_SPLIT_SECONDS = 270.0              # 4.5 分钟；qwen3-asr 官方口径约 5 分钟
+
+
+def is_file_type_model(model):
+    """是否「一次转写一个文件」的模型（单次 10MB / 约 5 分钟上限）。"""
+    m = str(model or '').lower()
+    return any(k in m for k in _FILE_MODEL_HINTS)
+
+
+def plan_asr_route(asr=None, duration=None, wav_bytes=None, mode=None):
+    """**转写路由唯一决策点**（所有入口共用，别再各自分叉）。
+
+    返回 {'run_mode': 'single'|'parallel', 'split': bool, 'model': str, 'reason': str}
+      run_mode : 'single'   → asr.recognize(wav) 整段一次
+                 'parallel' → asr.recognize_parallel(wav)（4 分钟静音切片并行）
+    split    : True 表示是**自动**改道的（调用方必须把 reason 写进用户日志）
+    参数：asr=ASR 实例（读 .model）、duration=音频真实秒数、wav_bytes=16k wav 字节数、
+         mode=用户/调用方指定模式（traditional/parallel/gummy/auto）
+    规则表见报告：流式 paraformer 系不动；gummy 自带分句不动；文件型模型 + 长/大 → 分片。
+    """
+    m = str(getattr(asr, 'model', '') or '').lower()
+    mode = (mode or 'traditional').lower()
+    try:
+        dur = float(duration or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    try:
+        nbytes = int(wav_bytes or 0)
+    except (TypeError, ValueError):
+        nbytes = 0
+    mb = nbytes / 1024.0 / 1024.0
+    long_audio = dur > _AUTO_SPLIT_SECONDS
+    big_file = nbytes > _AUTO_SPLIT_BYTES
+
+    if mode == 'gummy':                      # 一体模式：按话语段自带时间戳，不切
+        return {'run_mode': 'single', 'split': False, 'model': m,
+                'reason': 'gummy 一体模式自带分句，整段提交'}
+    if mode == 'parallel':                   # 用户显式选了分片并行：无条件照办
+        return {'run_mode': 'parallel', 'split': False, 'model': m,
+                'reason': '用户选择分片并行模式'}
+    if (long_audio or big_file) and not hasattr(asr, 'recognize_parallel'):
+        # 该 ASR 实例没有分片能力（如 qwen-audio-3.1-asr 多模态口、MiMo）：
+        # 别谎称"已自动分片"，如实说清并整段提交（超限时会由模型侧守卫报错）。
+        return {'run_mode': 'single', 'split': False, 'model': m,
+                'reason': '该模型无分片能力（recognize_parallel 缺失），整段提交'}
+    if is_file_type_model(m) and (long_audio or big_file):
+        return {'run_mode': 'parallel', 'split': True, 'model': m,
+                'reason': '长音频自动分片并行（原因：%s 单次上限 10MB/约 5 分钟，本次 '
+                          '%.1f 分钟 / %.1fMB）' % (m or '文件转写型模型', dur / 60.0, mb)}
+    # 流式/带词级时间戳的 paraformer 系**不分片**：单次可吃几小时、便宜、逐句准；
+    # 无谓分片只会多付一次首包延迟和合并风险（用户口径：保持原行为）。
+    streamish = ('paraformer' in m) or ('realtime' in m)
+    if long_audio and big_file and not streamish:   # 未知模型但确实超了：同样分片
+        return {'run_mode': 'parallel', 'split': True, 'model': m,
+                'reason': '长音频自动分片并行（原因：%.1f 分钟 / %.1fMB 超过单次 '
+                          '10MB/5 分钟上限）' % (dur / 60.0, mb)}
+    if long_audio:
+        return {'run_mode': 'single', 'split': False, 'model': m,
+                'reason': '长音频但模型无 5 分钟限制（流式/带时间戳），保持整段'}
+    return {'run_mode': 'single', 'split': False, 'model': m,
+            'reason': '短音频，整段一次提交'}
+
+
+def _fix_cue_drift(cues, duration=None, log=None):
+    """#1 末句越界钳制：插值时间轴（qwen3 系无词级时间戳）算出的末句 end 常超出
+    音频真实时长（按 2.5 词/秒插值 + 缩放取整的累计误差）。播放器遇到 end > 时长
+    的切段会 seek 失败/拖静音尾，用户感知就是「音频和句子对不上」。
+    只在 end 明显越界时裁到末尾，绝不改 start、不动文本、不碰正常句。"""
+    if not cues or not duration:
+        return cues
+    try:
+        dur = float(duration)
+    except (TypeError, ValueError):
+        return cues
+    if dur <= 0:
+        return cues
+    n = 0
+    for c in cues:
+        s = float(c.get('start') or 0)
+        e = float(c.get('end') or 0)
+        if e > dur - 0.02 and s < dur - 0.05:
+            c['end'] = round(max(s + 0.2, dur - 0.02), 3)
+            n += 1
+    if n and log:
+        log('末句超时长已钳制：%d 句的结尾落在音频时长之后（音频 %.2fs），已裁到末尾' % (n, dur))
+    return cues
+
+
+def _silence_edges(wav, log=None, noise_db=-35, min_sil=0.35):
+    """整段跑一次 ffmpeg silencedetect，返回静音区间 [(start, end), …]。
+
+    #1 句界吸附的数据源。只跑一次（长音频一次 ≈ 0.1×实时），结果给全部 cue 共用。
+    - ffmpeg 缺失/报错/没有静音 → 返回 None（调用方整段跳过，绝不报错、绝不让下载失败）。
+    - 尾静音（容器末尾到结束没有闭合的 silence_end）用 1e9 占位，只当"句尾候选"，
+      不参与"句首吸附"。
+    """
+    if not getattr(tl, 'FFMPEG', None):
+        return None
+    try:
+        cmd = [tl.FFMPEG, '-hide_banner', '-nostats', '-i', str(wav),
+               '-af', 'silencedetect=noise=%ddB:d=%.2f' % (int(noise_db), float(min_sil)),
+               '-f', 'null', '-']
+        rr = subprocess.run(cmd, capture_output=True, creationflags=_no_window())
+    except Exception as e:                       # noqa: BLE001 —— 探测失败不影响转写
+        if log:
+            log('句界吸附：静音检测不可用（%s），本段跳过' % str(e)[:60])
+        return None
+    err = rr.stderr.decode('utf-8', 'replace') or ''
+    gaps, cur = [], None
+    for m in re.finditer(r'silence_(start|end):\s*(-?[0-9.]+)', err):
+        v = float(m.group(2))
+        if m.group(1) == 'start':
+            cur = v
+        elif cur is not None:
+            if v > cur:
+                gaps.append((cur, v))
+            cur = None
+    if cur is not None:                          # 尾静音未闭合
+        gaps.append((cur, 1e9))
+    return gaps or None
+
+
+def _snap_cues_to_silence(cues, wav, log=None, tol=0.4):
+    """#1 真修：把句界吸附到真实静音处（boundary snapping）。
+
+    为什么需要：合并/拆分层都是"用词数猜时间"——_merge_fragments 允许合并 <5s 空档，
+    合成 cue 的时长含静音；_split_sentences 数量对不上时按词数线性摊整段时长，
+    静音被当语音平分 → 句界整体后移（cue 内累积误差 = 静音总长）。
+    阈值调不动这个，只有把句界拉回真实静音才治本。
+
+    规则（全部有界，宁可不动也不吃词）：
+      - cue.start → ±tol 内最近的「静音结束点」（人开口处）
+      - cue.end   → ±tol 内最近的「静音开始点」（人闭口处）
+      - 吸附后强制 start+0.12 < end；不越过上一句 end（+0.02）、不越过下一句 start（-0.02）
+      - 位移上限 tol(=0.4s)：超出范围不吸附
+    失败（ffmpeg 不可用 / 没有静音 / 异常）→ 原样返回，日志一句跳过原因。
+    """
+    if not cues:
+        return cues
+    try:
+        gaps = _silence_edges(wav, log)
+    except Exception as e:                       # noqa: BLE001
+        if log:
+            log('句界吸附：跳过（%s）' % str(e)[:60])
+        return cues
+    if not gaps:
+        if log:
+            log('句界吸附：本段没有检测到可用静音边界，跳过')
+        return cues
+    starts = [g[0] for g in gaps]                # 静音开始 → 句尾候选
+    ends = [g[1] for g in gaps if g[1] < 1e8]    # 静音结束 → 句首候选
+
+    def nearest(pool, x):
+        best, bd = None, float(tol)
+        for v in pool:                           # 池很小（几十个），线性扫足够
+            d = abs(v - x)
+            if d <= bd:
+                best, bd = v, d
+        return best
+
+    moved, disp, bounds = 0, 0.0, len(cues) * 2
+    prev_end = -1.0
+    for i, c in enumerate(cues):
+        s = float(c.get('start') or 0)
+        e = float(c.get('end') or 0)
+        nxt = float(cues[i + 1].get('start') or 0) if i + 1 < len(cues) else None
+        ns = nearest(ends, s)
+        if ns is not None and ns > prev_end + 0.02 and s + 0.08 < ns < e - 0.12:
+            disp += abs(ns - s)
+            s = ns
+            moved += 1
+        c['start'] = round(s, 3)
+        ne = nearest(starts, e)
+        if ne is not None and ne > s + 0.12 and (nxt is None or ne <= nxt - 0.02):
+            disp += abs(ne - e)
+            e = ne
+            moved += 1
+        c['end'] = round(max(e, s + 0.2), 3)
+        prev_end = c['end']
+    if log:
+        avg = (disp / moved * 1000.0) if moved else 0.0
+        log('句界吸附：%d/%d 个句界已对齐静音（平均位移 %.0f ms）' % (moved, bounds, avg))
+    return cues
+
+
+def _asr_to_cues(mp3, workdir, asr, log, duration, mode='traditional', kind=None,
+                 keep_asr_model=False):
     """没有字幕时：wav → 阿里云转写 → 逐句 cues。
 
     mode: traditional=整段顺序 / parallel=静音切片并行 / gummy=转写翻译一体。
@@ -572,19 +1234,44 @@ def _asr_to_cues(mp3, workdir, asr, log, duration, mode='traditional'):
     并行已加固（合并 v2：词集相似判重保完整 + 1.5s 重叠），长音频不再强制单流
     ——当年 >20min 禁并行是旧合并 (start,text) 精确键去不掉半句/全句双版的
     权宜之计，根因已修（67集 A-A-B-A-C 交错事故不再复现）。
+
+    kind: 来源类型（videokind.classify 的结果：talk/reading/dialogue/podcast/other），
+    只影响切分合并参数（max_words/max_dur/min_words），None 视同 other＝今天的行为。
+    keep_asr_model: True 时**不**走 _timestamp_asr 的 audioModel 覆盖，直接用传入的 asr
+    ——对齐定稿（doctor）专用：那里传入的是 paraformer-realtime-v2（唯一有词级时间戳的
+    引擎），被覆盖成 qwen3/omni 会让对齐静默失效（#6 反向绕过的真根因）。默认 False＝老行为。
     """
     import tempfile
-    asr = _timestamp_asr(asr, log)      # MiMo 无时间戳 → 自动换 paraformer / 硬拦截
+    if keep_asr_model:
+        if log:
+            log('转写模型：%s（对齐定稿：保持传入引擎，不覆盖为 audioModel）'
+                % (getattr(asr, 'model', '') or '?'))
+    else:
+        asr = _timestamp_asr(asr, log)  # MiMo 无时间戳 → 自动换 paraformer / 硬拦截
+    r = _vk.rules(kind)                 # 第⑤问：对话要短句不跨人并、读书可长句
+    if log and not keep_asr_model:
+        log('转写模型：%s（audioModel 生效结果，来源类型 %s）'
+            % (getattr(asr, 'model', '') or '?', _vk.label(kind)))
     tmpdir = Path(tempfile.mkdtemp(prefix='ted_asr_'))
     wav = tmpdir / (Path(mp3).stem + '.16k.wav')
     try:
         if log:
             log('转换音频为 16k WAV…')
+        # 【不要在这里加 -avoid_negative_ts / asetpts / 任何按 start_time 的平移】
+        # 部分 mp3 容器的 format.start_time 是 0.025057（LAME 编码器延迟元数据）。
+        # 曾怀疑它造成 25ms 时间轴偏移（E-06），但 2026-10-17 用
+        # `_tools/_t_e06_starttime.py` 对全部 14 个语料实测：
+        #   解码 WAV 时长 == 容器 duration，差值恒为 0.0000
+        # 即 ffmpeg 解码**没有丢弃**这段延迟，两侧时间轴本来就对齐。
+        # 强行平移只会把一个不存在的偏移引入进来。
+        # 该探针已保留为回归工具：若将来 ffmpeg 行为变化导致差值非零，会被它发现。
         cmd = [tl.FFMPEG, '-hide_banner', '-loglevel', 'error', '-y', '-i', str(mp3),
                '-ac', '1', '-ar', '16000', str(wav)]
-        r = subprocess.run(cmd, capture_output=True, creationflags=_no_window())
-        if r.returncode != 0 or not wav.exists():
-            err = (r.stderr.decode('utf-8', 'replace') or '').strip()[-200:]
+        # 变量名注意：r 已被 _vk.rules(kind) 占用（切分参数），这里绝不能再用 r，
+        # 否则下游 r['max_words'] 会拿到 CompletedProcess（2026-10-18 端到端测试抓到的真 bug）。
+        cr = subprocess.run(cmd, capture_output=True, creationflags=_no_window())
+        if cr.returncode != 0 or not wav.exists():
+            err = (cr.stderr.decode('utf-8', 'replace') or '').strip()[-200:]
             raise RuntimeError('WAV 转换失败：' + (err or '未知错误'))
 
         zh_cues = None
@@ -609,26 +1296,44 @@ def _asr_to_cues(mp3, workdir, asr, log, duration, mode='traditional'):
             except Exception as e:
                 if log:
                     log(f'Gummy 失败（{str(e)[:120]}），回落分片/整段转写')
-                cues = _plain_asr_cues(asr, str(wav), log, mode, workdir)
+                cues = _plain_asr_cues(asr, str(wav), log, mode, workdir, duration)
         else:
-            cues = _plain_asr_cues(asr, str(wav), log, mode, workdir)
+            cues = _plain_asr_cues(asr, str(wav), log, mode, workdir, duration)
         cues = sanitize_cues(cues)
-        cues = assemble_sentences(cues)      # A6/A2：碎片合并+句末拆分（新导入不再产腰斩/轮次句）
-        cues = _split_long_cues(cues)
+        # 第⑤问 / 第11问：来源类型参数 + 语义完整段重切，全部集中在 resegment_cues
+        # 一处（碎片合并 → 真句界拆分 → 含义段落合并 → 超长单句弱边界 → 末句钳制
+        # → 句界吸静音），避免"生成出口"和"读取出口"再各自分叉
+        # （《傲慢与偏见》p01 那类半句 cue 的根因：_split_long_cues 按词数硬剁）。
+        cues = resegment_cues(cues, audio_path=str(wav), duration=duration,
+                              kind=kind, log=log)
         return cues, zh_cues
     finally:
         import shutil as _sh
         _sh.rmtree(tmpdir, ignore_errors=True)
 
 
-def _plain_asr_cues(asr, wav, log, mode, workdir=None):
-    """传统/分片并行共用：调 recognize 或 recognize_parallel → cues。"""
-    if mode == 'parallel' and hasattr(asr, 'recognize_parallel'):
-        if log:
+def _plain_asr_cues(asr, wav, log, mode, workdir=None, duration=None):
+    """传统/分片并行共用：先过 **plan_asr_route 统一路由** → recognize 或
+    recognize_parallel → cues。
+
+    #10 根因：旧版只认 mode=='parallel' 才分片；用户 config asrMode='traditional'
+    + audioModel=qwen3-asr-flash（单次上限 10MB/约 5 分钟）→ 94 分钟音频整段提交
+    → 必炸。现在按「模型能力 + 时长/体积」自动改道，日志写清为什么分片。
+    """
+    wbytes = 0
+    try:
+        wbytes = Path(wav).stat().st_size
+    except OSError:
+        pass
+    route = plan_asr_route(asr, duration, wbytes, mode)
+    if log and route['split']:
+        log(route['reason'])
+    if route['run_mode'] == 'parallel' and hasattr(asr, 'recognize_parallel'):
+        if log and not route['split']:
             log('分片并行模式（约快 3 倍）…')
         res = asr.recognize_parallel(wav, language='en', workers=4, log=log)
     else:
-        if log:
+        if log and not route['split']:
             log('阿里云语音转写中（英文，逐句时间戳）…')
         res = asr.recognize(wav, language='en')
     sents = res.get('sentences') or []
@@ -868,6 +1573,10 @@ def _download_one(url, outdir, log=None, control=None, proxy='', progress=None,
     outdir.mkdir(parents=True, exist_ok=True)
     say(f'标题：{title}')
     say(f'时长：{dur // 60} 分 {dur % 60} 秒')
+    # 第⑤问：来源类型（演讲/对话/读书/播客）→ 决定并句/切句参数；日志里让用户
+    # 看见「这次为什么处理得不一样」（对话不跨人并句、读书不切碎韵文）。
+    kind = _vk.classify(title, url, {'source': plat, 'duration': dur})
+    say(f'来源类型：{_vk.label(kind)}｜{_vk.describe(kind)}')
 
     made = []
 
@@ -921,7 +1630,8 @@ def _download_one(url, outdir, log=None, control=None, proxy='', progress=None,
         else:
             if progress:
                 progress({'stage': 'asr', 'percent': None})
-        en_cues, gummy_zh = _asr_to_cues(mp3, outdir, asr, log, dur, mode=asr_mode)
+        en_cues, gummy_zh = _asr_to_cues(mp3, outdir, asr, log, dur, mode=asr_mode,
+                                         kind=kind)      # 第⑤问：来源类型进后处理参数
         if gummy_zh and not zh_cues:
             zh_cues = gummy_zh
             say(f'Gummy 自带中文翻译：{len(zh_cues)} 句（跳过 LLM 翻译）')
@@ -961,6 +1671,7 @@ def _download_one(url, outdir, log=None, control=None, proxy='', progress=None,
         'addedAt': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'tags': [], 'note': '',
         'enCues': len(en_cues), 'zhCues': len(zh_cues),
+        'sourceKind': kind,          # 第⑤问：来源类型（app._stamp_source_kind 已有值不覆盖）
     }, ensure_ascii=False, indent=1), encoding='utf-8')
 
     if not en_cues:

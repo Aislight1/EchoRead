@@ -1,14 +1,16 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-语音合成（TTS）
+语音合成（TTS）——多供应商路由层。
 
-主用小米 MiMo-V2.5-TTS（OpenAI 兼容协议）；另留 Edge TTS 作后备（无需 Key）。
+主用小米 MiMo-V2.5-TTS（OpenAI 兼容协议）；另留 Edge TTS 作后备（无需 Key）；
+阿里云 Qwen TTS（qwen3 / CosyVoice / MiniMax 三系，端点各不同）由 speech_providers 注册表驱动。
 
-MiMo 三个模型（实测 2026-10）：
-  mimo-v2.5-tts             普通合成，audio.voice 传内置音色名
-  mimo-v2.5-tts-voicedesign 用**文字描述**设计音色，**不能传 voice**；返回一个 id
-  mimo-v2.5-tts-voiceclone  音色克隆，audio.voice 传**参考音频的 DataURL**；返回一个 id
+#9「音色工作台」（声音设计 voicedesign / 声音复刻 voiceclone / 我的音色）已整块下线：
+  · 合成按「供应商 → 该供应商最新一代模型 → 该模型系的音色」三级解析，目录只有一份
+    （speech_providers.PROVIDERS['tts']），TTS 层不再自带第二份音色表；
+  · 老配置里的 voicedesign / voiceclone 模型名 → aliases 自动映射回普通合成模型；
+  · design_voice / clone_voice 只保留抛「功能已移除」的 stub，给 app.py 侧同步删除的过渡期用。
 """
 import base64
 import hashlib
@@ -144,6 +146,15 @@ VOICE_PRESETS = [
 ]
 
 
+# MiMo 风格预设自带的音色名 → 阿里云 qwen3 系的等价音色（同一角色/性别，避免跨系 411）
+_MIMO_VOICE_MAP = {'Chloe': 'Cherry', 'Mia': 'Serena', 'Dean': 'Ethan', 'Milo': 'Ethan'}
+# 同一批风格名 → Edge 神经音（Edge 目录里没有 Chloe/Mia，直接发会 Invalid voice）
+_MIMO_EDGE_MAP = {'Chloe': 'en-US-AriaNeural', 'Mia': 'en-GB-SoniaNeural',
+                  'Dean': 'en-US-GuyNeural', 'Milo': 'en-US-GuyNeural',
+                  '冰糖': 'zh-CN-XiaoxiaoNeural', '茉莉': 'zh-CN-XiaoxiaoNeural',
+                  '苏打': 'zh-CN-YunxiNeural', '白桦': 'zh-CN-YunxiNeural'}
+
+
 def preset_by_id(pid):
     for p in VOICE_PRESETS:
         if p['id'] == pid:
@@ -169,7 +180,14 @@ class TTS:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.log = log
         self._client = None
-        self.extra_presets = extra_presets or []      # 自定义/设计/克隆出来的音色
+        # extra_presets = app.py 的 voices.json。音色工作台下线后，只剩「练习页自定义风格」
+        # 这一类（custom_ 开头、没有 kind）还有效；design_/clone_ 两类是已移除的能力，
+        # 直接过滤掉——老配置文件里躺着也不会在界面出现，更不会去调 moot 的接口。
+        legacy = [p for p in (extra_presets or [])
+                  if isinstance(p, dict) and p.get('id')
+                  and (p.get('kind') not in ('design', 'clone'))]
+        self._legacy_presets = len(extra_presets or []) - len(legacy)   # 被丢掉的旧音色数（仅日志用）
+        self.extra_presets = legacy
 
     def _say(self, m):
         if self.log:
@@ -178,15 +196,31 @@ class TTS:
             except Exception:
                 pass
 
-    # ---------- 音色查找（先内置，再自定义）
-    def _preset(self, pid):
+    # ---------- 音色查找：内置风格预设 → 供应商音色目录 → 兜底
+    def _preset(self, pid, provider=None, model=None):
+        """id → 预设 dict（永远返回副本，绝不改 VOICE_PRESETS 里的共享项）。
+
+        带 _cat=True 表示「用户直接在音色下拉里点了这个真实音色」：合成时它的 voice
+        优先于全局 dashscopeVoice（否则选了音色也被全局值顶回去，试听全是同一个声音）。
+        """
         for p in VOICE_PRESETS:
             if p['id'] == pid:
-                return p
+                return dict(p, _cat=False)
+        provider = (provider or self._provider()).lower()
+        try:
+            import speech_providers as _spv
+            for v in _spv.tts_voices(provider, model, with_default=False):
+                if v.get('id') and v['id'] == pid:
+                    return {'id': pid, 'name': v.get('label') or pid,
+                            'desc': v.get('desc') or v.get('group') or '',
+                            'group': v.get('group') or '当前引擎音色',
+                            'voice': pid, 'instruct': '', '_cat': True}
+        except Exception:
+            pass
         for p in self.extra_presets:
             if p.get('id') == pid:
-                return p
-        return VOICE_PRESETS[0]
+                return dict(p, _cat=False)
+        return dict(VOICE_PRESETS[0], _cat=False)
 
     # ---------- 客户端
     def _mimo_client(self):
@@ -197,67 +231,135 @@ class TTS:
         ⚠ 缓存键=(供应商,base,key)：换引擎后必须重建客户端——曾经单例缓存，
         切了供应商仍打旧端点旧模型（"串到别的模型"的真凶）。"""
         import speech_providers as _spv
+        pid = (self.cfg.get('ttsProvider') or 'dashscope').strip()
         try:
-            _ep = _spv.resolve_tts_endpoint(self.cfg, (self.cfg.get('ttsProvider') or 'mimo').strip())
+            ep = _spv.resolve_tts_endpoint(self.cfg, pid)
         except Exception:
-            _ep = {}
-        _ck = (_ep.get('provider'), _ep.get('baseUrl'), _ep.get('apiKey'))
+            ep = {'provider': pid, 'baseUrl': self.cfg.get('dashscopeBaseUrl'),
+                  'apiKey': self.cfg.get('dashscopeApiKey'),
+                  'model': (self.cfg.get('ttsEngineModels') or {}).get(pid)}
+        _ck = (ep.get('provider'), ep.get('baseUrl'), ep.get('apiKey'))
         if self._client is not None and getattr(self, '_client_key', None) == _ck:
             return self._client
-        pid = (self.cfg.get('ttsProvider') or 'mimo').strip()
-        try:
-            import speech_providers as spv
-            ep = spv.resolve_tts_endpoint(self.cfg, pid)
-        except Exception:
-            ep = {'provider': 'mimo', 'baseUrl': self.cfg.get('mimoBaseUrl'),
-                  'apiKey': self.cfg.get('mimoApiKey'),
-                  'model': self.cfg.get('mimoTtsModel')}
         key = (ep.get('apiKey') or '').strip()
         if not key:
-            raise RuntimeError(f'还没填 {pid} 的 API Key（设置 → 语音合成）')
+            raise RuntimeError(f'还没填 {pid} 的 API Key（设置 → 语音输出 → 当前引擎 Key）')
         try:
             from openai import OpenAI
         except ImportError:
             raise RuntimeError('缺少 openai 库：pip install openai')
         base = (ep.get('baseUrl') or '').strip()
         if not base:
-            raise RuntimeError(f'{pid} 的 Base URL 为空（设置 → 语音合成）')
-        # 模型联动：注册表默认模型 or 用户覆盖
-        if pid != 'mimo':
-            m = (ep.get('model') or '').strip()
-            if m and not self.cfg.get('mimoTtsModel'):
-                self.cfg['mimoTtsModel'] = m
+            raise RuntimeError(f'{pid} 的 Base URL 为空（设置 → 语音输出 → 当前引擎）')
+        # 曾经这里把别家供应商的模型名写回 cfg['mimoTtsModel']（"模型联动"）：
+        # 切到阿里云后配置里躺着 qwen 的模型名，切回 MiMo 时拿它去打请求，
+        # 模型/音色/缓存键全部错位（#C「引擎切换后不同步」的后端根因）。
+        # 模型解析现在只在 _eff_model() 里按 provider 做，绝不回写配置。
         self._client = OpenAI(api_key=key, base_url=base, timeout=120)
         self._client_key = (pid, base, key)      # 缓存键：换供应商/base/key 自动重建
         return self._client
 
     def _provider(self):
-        return (self.cfg.get('ttsProvider') or 'mimo').lower()
+        return (self.cfg.get('ttsProvider') or 'dashscope').lower()
 
     def _model(self):
-        return (self.cfg.get('mimoTtsModel') or 'mimo-v2.5-tts').strip()
+        # MiMo V2.5 已于 2026-10-21 下线，默认模型不再写死死值：
+        # 没显式配置就交给注册表取该供应商最新一代（见 _eff_model）。
+        return (self.cfg.get('mimoTtsModel') or '').strip()
+
+    def _eff_model(self, provider):
+        """该供应商「下一次合成真正会用的模型」：
+        ttsEngineModels[pid] > 旧键（仅 mimo）> 注册表该供应商的最新一代（不是 MiMo 的默认）。
+        旧模型名在这里一次性映射到最新等价模型（aliases），保证请求/日志/缓存键三者一致。"""
+        provider = (provider or self._provider()).lower()
+        mo = ''
+        try:
+            mo = ((self.cfg.get('ttsEngineModels') or {}).get(provider) or '').strip()
+        except Exception:
+            mo = ''
+        if not mo and provider == 'mimo':
+            mo = self._model()
+        try:
+            import speech_providers as _spv
+            m, note = _spv.tts_canonical_model(provider, mo or _spv.tts_default_model(provider))
+            if note:
+                self._say(note)
+            return m
+        except Exception:
+            return mo or self._model()
 
     # ---------- 合成主入口
     def synthesize(self, text, preset_id='narrator', provider=None, force=False,
                    voice_override=None, model_override=None, tag='', rate=None):
         """合成一段文本 -> 本地 wav 路径。
 
-        voice_override / model_override 用于：
-          · 设计出来的音色（voicedesign 返回的 id）
-          · 克隆出来的音色（voiceclone 返回的 id）
-          · Edge TTS 的 voice 名
+        voice_override / model_override 用于试听指定音色、Edge 的 voice 名、
+        以及供应商中心里手填的模型名（都会被收敛成「合法且最新」的值）。
         """
         text = (text or '').strip()
         if not text:
             raise RuntimeError('文本为空')
         provider = (provider or self._provider()).lower()
-        preset = self._preset(preset_id)
-        model = (model_override or self._model())
-        # 音色优先级：显式覆盖 > 预设自带 > 全局默认 > 兜底。
-        # 曾经全局 mimoVoice 排在预设前——男声预设全被全局女声顶掉（用户实测男声全女声的真凶）
-        voice = voice_override or preset.get('voice') or self.cfg.get('mimoVoice') or 'Chloe'
+        try:
+            import speech_providers as _spv
+        except Exception:
+            _spv = None
 
-        key_src = f'{provider}|{model}|{voice}|{preset.get("id")}|{tag}|{text}'
+        # ① 模型：显式覆盖 > 该供应商注册表的最新一代。
+        #    曾在这里蹲死 self._model()（MiMo 的模型名）——切到阿里云后，缓存键和
+        #    报错提示写的都是 MiMo 模型，实际请求又是 qwen：模型/音色/缓存全错位（#C）。
+        model = (model_override or '').strip()
+        if model and _spv:
+            model, _mn = _spv.tts_canonical_model(provider, model)
+            if _mn:
+                self._say(_mn)
+        model = model or (self._eff_model(provider) if _spv else self._model())
+
+        # ①.5 MiMo V2.5 下线守卫：模型为空或在 MIMO_RETIRED_MODELS 里就不要发请求。
+        #     直接打过去只会拿到 404/invalid model，前端只能看到一句天书；
+        #     这里提前抛人话，指引用户切到阿里云/Edge（或手填 v2.6 模型名）。
+        if provider == 'mimo' and _spv:
+            low = (model or '').strip().lower()
+            retired = {str(x).lower() for x in getattr(_spv, 'MIMO_RETIRED_MODELS', set())}
+            if not low or low in retired:
+                raise RuntimeError(getattr(_spv, 'MIMO_RETIRED_NOTE',
+                                           'MiMo V2.5 已下线，请改用阿里云 Qwen TTS 或 Edge'))
+
+        # ② 预设 + 音色。音色优先级：显式覆盖 > 预设自带 > 全局默认 > 兜底。
+        #    （曾把全局 mimoVoice 排在预设前——男声预设全被全局女声顶掉）
+        preset = self._preset(preset_id, provider, model)
+        voice = (voice_override or preset.get('voice') or '').strip()
+        if not voice:
+            voice = (self.cfg.get('mimoVoice') or 'Chloe')
+
+        # ③ 阿里云：音色必须属于当前模型系（跨系=Engine411），统一在这里收敛一次。
+        #    音色下拉里直接点的真实音色优先；否则 全局 dashscopeVoice > MiMo 预设名映射 > 该系默认。
+        instruct = (preset.get('instruct') or '').strip()
+        if _spv and provider == 'dashscope':
+            if not preset.get('_cat'):
+                voice = (self.cfg.get('dashscopeVoice') or '').strip() \
+                    or _MIMO_VOICE_MAP.get(voice, voice) or voice
+            voice, _vn = _spv.tts_pick_voice(provider, model, voice)
+            if _vn:
+                self._say(_vn)
+
+        # ③b Edge：预设自带的是 MiMo 风格名（Chloe/Mia/Dean…），Edge 神经音目录里没有，
+        #     直接发会 Invalid voice。统一映射到最接近的神经音，再校验一次。
+        if _spv and provider == 'edge':
+            if not preset.get('_cat'):
+                voice = _MIMO_EDGE_MAP.get(voice, voice)
+            try:
+                valid = {v.get('id') for v in _spv.tts_voices('edge')}
+            except Exception:
+                valid = set()
+            if voice not in valid:
+                voice = 'en-US-AriaNeural'
+
+        # ④ 缓存键必须覆盖所有真正影响音频的参数：供应商/模型/音色/语速/风格指令/标签/文本。
+        #    曾漏了 dashscopeVoice 与 edgeRate —— 换了音色仍命中上一个音色的音频
+        #    （「试听听到的还是上一个音色」/「改了音色没反应」的根因）。
+        key_src = '|'.join([provider, model, voice, str(rate or ''),
+                            instruct, str(tag or ''), text])
         h = hashlib.sha1(key_src.encode('utf-8')).hexdigest()[:16]
         # 合成缓存统一放 cache/tts/ 子文件夹（persist，重打包不丢，可整夹清理）
         cdir = (self.cache_dir or Path('.')) / 'tts'
@@ -270,35 +372,18 @@ class TTS:
             if provider == 'edge':
                 data = self._edge(text, voice, rate=rate)
             elif provider == 'dashscope':
-                # 多供应商路由（P-供应商中心）：阿里云 Qwen TTS，模型优先 preset.model
-                # 默认 qwen3-tts-flash——非实时 HTTP 口已验证的稳定款（3.1 系是实时流式系）
-                data = self._dashscope(text, preset, voice,
-                                       model_override or preset.get('model') or 'qwen3-tts-flash')
-            elif preset.get('kind') == 'design':
-                # 设计出来的音色：**不能**把它的 id 当 voice 传给普通合成
-                # （实测报 "Unknown voice: <id>"），必须重新过 voicedesign 模型
-                data, vid = self._voicedesign(text, preset.get('instruct') or 'A clear voice.')
-                self._say(f'用设计音色「{preset.get("name")}」合成（id={str(vid)[:8]}…）')
-            elif preset.get('kind') == 'clone':
-                # 克隆音色同理：id 不能复用，必须拿参考音频重新克隆
-                ref = preset.get('refAudio') or ''
-                if not ref or not Path(ref).exists():
-                    raise RuntimeError(f'克隆音色「{preset.get("name")}」的参考音频找不到了，请重新克隆一次')
-                data, vid = self._voiceclone(text, preset.get('instruct') or 'A natural clear voice.',
-                                             self._as_dataurl(ref))
-                self._say(f'用克隆音色「{preset.get("name")}」合成（id={str(vid)[:8]}…）')
-            elif model.endswith('voicedesign'):
-                data, vid = self._voicedesign(text, preset.get('instruct') or 'A clear voice.')
-                self._say(f'音色设计 id={vid}')
-            elif model.endswith('voiceclone'):
-                data, vid = self._voiceclone(text, preset.get('instruct') or 'A clear voice.', voice)
-                self._say(f'音色克隆 id={vid}')
+                # 多供应商路由：阿里云 Qwen TTS（模型/音色已在上面收敛到同一系）
+                data = self._dashscope(text, preset, voice, model)
             else:
+                # mimo / volc / siliconflow / custom：OpenAI 兼容口
+                if not model:
+                    raise RuntimeError(f'{provider} 还没选模型（语音输出 → 模型名填一个再保存）')
                 data = self._mimo(text, preset, voice, model)
         except RuntimeError as e:
             # 报错翻译层：错误码后面跟人话提示（模型不支持/Key/限流/超时），前端红字
-            import speech_providers as _spv
-            raise RuntimeError(_spv.err_hint(model, str(e), 'tts')) from None
+            if _spv:
+                raise RuntimeError(_spv.err_hint(model, str(e), 'tts')) from None
+            raise
         cdir.mkdir(parents=True, exist_ok=True)
         out.write_bytes(data)
         self._say(f'合成完成：{out.name}（{len(data) / 1024:.0f} KB）')
@@ -306,36 +391,44 @@ class TTS:
 
     # ---------- 阿里云/千问平台 Qwen TTS（多供应商路由之一）
     # 三系模型分家路由（官方文档口径，端点不可混用——url error/Engine411 的总根源）：
-    #   qwen-audio-*/cosyvoice* → /api/v1/services/audio/tts/SpeechSynthesizer
-    #       input{text,voice,format,sample_rate}（cosyvoice 可带 instruction）
     #   qwen3-tts*             → /api/v1/services/aigc/multimodal-generation/generation
     #       input{text,voice,language_type}
+    #   qwen-audio-*/cosyvoice* → /api/v1/services/audio/tts/SpeechSynthesizer
+    #       input{text,voice,format,sample_rate}（cosyvoice 可带 instruction）
     #   MiniMax/*              → multimodal 口但 input 是 voice_setting/audio_setting 结构
-    # base 可配 cfg.dashscopeBaseUrl（百炼默认；千问平台填 https://maas.qianwenaiapi.com）
-    QW_TTS_VOICE_SETS = {
-        'qwen3': ['Cherry', 'Serena', 'Ethan', 'Maia', 'Chelsie', 'Momo', 'Kai', 'Nofish',
-                  'Bella', 'Jennifer', 'Ryan', 'Moon', 'Mia', 'Vincent', 'Neil', 'Andre'],
-        'qa': ['longanyang', 'longanhuan_v3.6', 'longanlingxin', 'longanlufeng', 'xunanchuan_v3.1',
-               'loongeva', 'loongjohn', 'loongmary', 'longjielidou_v3.6', 'longpaopao_v3.6',
-               'longhuohuo_v3.6', 'longchuanshu_v3.6'],
-        'minimax': ['male-qn-qingse'],
-    }
-
+    # 系别判定只认 speech_providers.tts_family（单一数据源），本文件不再自带音色表。
+    # key/base 走 speech_providers.resolve_tts_endpoint：供应商中心里的覆盖能立即生效（热更新）。
     def _dashscope(self, text, preset, voice, model):
-        key = (self.cfg.get('dashscopeApiKey') or '').strip()
+        try:
+            import speech_providers as _spv
+        except Exception:
+            raise RuntimeError('speech_providers.py 载入失败，无法解析阿里云端点')
+        ep = _spv.resolve_tts_endpoint(self.cfg, 'dashscope')
+        key = (ep.get('apiKey') or '').strip() or (self.cfg.get('dashscopeApiKey') or '').strip()
         if not key:
-            raise RuntimeError('还没填阿里云 DashScope API Key（设置 → 语音输出）')
+            raise RuntimeError('还没填阿里云 DashScope API Key（设置 → 语音输出 → 当前引擎 Key）')
+        # 模型一律按最新一代解析：显式选的模型（ttsEngineModels / 试听）优先，
+        # 没有才用注册表默认；旧名在这里再兜一层 aliases。
+        model, _mnote = _spv.tts_canonical_model('dashscope',
+                                                 (model or '').strip() or ep.get('model') or '')
+        if _mnote:
+            self._say(_mnote)
         _bad = [x for x in ('realtime', 'asr', 'filetrans', 'embed', 'rerank') if x in (model or '').lower()]
         if _bad:
             raise RuntimeError(f'「{model}」是 {_bad[0]} 系模型，不能用于语音合成'
                                '（realtime=全双工对话/asr=识别/filetrans=离线转写）——请换 tts 系模型')
-        host = (self.cfg.get('dashscopeBaseUrl') or 'https://dashscope.aliyuncs.com').rstrip('/')
+        # 高级覆盖（千问AI平台等）> 注册表 baseUrl（去掉 /api/v1 尾巴，端点自己拼）
+        host = (self.cfg.get('dashscopeBaseUrl') or '').strip().rstrip('/')
+        if not host:
+            b = (ep.get('baseUrl') or '').strip().rstrip('/')
+            host = (b[:-len('/api/v1')] if b.endswith('/api/v1') else b) or 'https://dashscope.aliyuncs.com'
         m = (model or '').lower()
 
-        # ---- 系别判定 + 端点 + 请求体 + 音色校验（音色必须属于该模型系，跨系=Engine411） ----
-        mimo_map = {'Chloe': 'Cherry', 'Mia': 'Serena', 'Dean': 'Ethan', 'Milo': 'Ethan'}  # MiMo 预设名→qwen3 系
-        cfg_voice = (self.cfg.get('dashscopeVoice') or '').strip()
-        v = cfg_voice or mimo_map.get(voice, voice) or ''
+        # ---- 系别 + 音色校验（音色必须属于该模型系，跨系=Engine411） ----
+        fam = _spv.tts_family('dashscope', model)
+        v, _vnote = _spv.tts_pick_voice('dashscope', model, voice)
+        if _vnote:
+            self._say(_vnote)
         instruct = (preset.get('instruct') or '').strip()
         body = (f'{instruct}\n{text}') if instruct else text
         # 官方上限：600 字符（qwen3-tts）；tts-next（Audiogen 系）3000
@@ -344,21 +437,17 @@ class TTS:
             body = body[:limit]
             self._say(f'文本超 {limit} 字符，已截断')
 
-        if m.startswith('minimax') or '/' in (model or ''):
-            fam, endpoint = 'minimax', '/api/v1/services/aigc/multimodal-generation/generation'
-            if v not in self.QW_TTS_VOICE_SETS['minimax']:
-                v = 'male-qn-qingse'
+        if fam == 'minimax':
+            endpoint = '/api/v1/services/aigc/multimodal-generation/generation'
             payload = {'model': model,
                        'input': {'text': body,
                                  'voice_setting': {'voice_id': v, 'speed': 1, 'vol': 1, 'pitch': 0},
                                  'audio_setting': {'sample_rate': 32000, 'bitrate': 128000,
                                                    'format': 'wav', 'channel': 1}}}
-        elif 'qwen-audio' in m or 'cosyvoice' in m:
+        elif fam == 'qwen-audio':
             # Qwen-Audio/CosyVoice 系（含 tts-next·Audiogen）：WS 实时通道优先，
             # 失败回落 HTTP 口（tts-next 仅 WS，无 HTTP 回落）
-            fam, endpoint = 'qa', '/api/v1/services/audio/tts/SpeechSynthesizer'
-            if v not in self.QW_TTS_VOICE_SETS['qa']:
-                v = 'longanyang'
+            endpoint = '/api/v1/services/audio/tts/SpeechSynthesizer'
             ins = instruct[:100] if 'cosyvoice' in m and instruct else None
             try:
                 return self._dashscope_ws(body, v, model, ins)
@@ -372,9 +461,7 @@ class TTS:
             payload = {'model': model, 'input': inp}
         else:
             # 默认 qwen3-tts 系（multimodal 口；-realtime 后缀系是 Realtime API 另协议，未接）
-            fam, endpoint = 'qwen3', '/api/v1/services/aigc/multimodal-generation/generation'
-            if v not in self.QW_TTS_VOICE_SETS['qwen3']:
-                v = 'Cherry'
+            endpoint = '/api/v1/services/aigc/multimodal-generation/generation'
             ascii_ratio = sum(1 for c in body if ord(c) < 128) / max(1, len(body))
             payload = {'model': model,
                        'input': {'text': body, 'voice': v,
@@ -463,13 +550,22 @@ class TTS:
         run-task(参数) → continue-task(text) → finish-task → 二进制帧攒齐。
         base 映射：cfg.dashscopeBaseUrl 的 https:// → wss:// + /api-ws/v1/inference；
         百炼默认域名则不传 url（走 SDK 默认端点）。"""
-        key = (self.cfg.get('dashscopeApiKey') or '').strip()
+        # key/base 同样走注册表解析：供应商中心里改了 Key/BaseUrl 立刻生效（热更新）
+        try:
+            import speech_providers as _spv
+            ep = _spv.resolve_tts_endpoint(self.cfg, 'dashscope')
+        except Exception:
+            ep = {}
+        key = (ep.get('apiKey') or '').strip() or (self.cfg.get('dashscopeApiKey') or '').strip()
         if not key:
-            raise RuntimeError('还没填阿里云 DashScope API Key（设置 → 语音输出）')
+            raise RuntimeError('还没填阿里云 DashScope API Key（设置 → 语音输出 → 当前引擎 Key）')
         import dashscope as _ds
         _ds.api_key = key
         from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
         host = (self.cfg.get('dashscopeBaseUrl') or '').strip().rstrip('/')
+        if not host:
+            b = (ep.get('baseUrl') or '').strip().rstrip('/')
+            host = b[:-len('/api/v1')] if b.endswith('/api/v1') else b
         url = None
         if host and 'dashscope.aliyuncs.com' not in host:
             url = host.replace('https://', 'wss://').replace('http://', 'ws://') \
@@ -509,81 +605,20 @@ class TTS:
             raise RuntimeError('返回的音频为空')
         return base64.b64decode(data)
 
-    @staticmethod
-    def _audio_meta(completion):
-        msg = completion.choices[0].message
-        a = getattr(msg, 'audio', None)
-        return a.model_dump() if hasattr(a, 'model_dump') else (a if isinstance(a, dict) else {})
-
-    # ---------- 音色设计（文字描述 -> 音色）
-    def _voicedesign(self, text, instruct):
-        client = self._mimo_client()
-        self._say('音色设计中…（用文字描述生成）')
-        c = client.chat.completions.create(
-            model='mimo-v2.5-tts-voicedesign',
-            messages=[{'role': 'user', 'content': instruct},
-                      {'role': 'assistant', 'content': text}],
-            audio={'format': 'wav'},          # 注意：voicedesign 不能传 voice
-        )
-        return self._audio_bytes(c), (self._audio_meta(c).get('id') or '')
-
-    # ---------- 音色克隆（参考音频 -> 音色）
-    @staticmethod
-    def _as_dataurl(path):
-        return 'data:audio/wav;base64,' + base64.b64encode(Path(path).read_bytes()).decode()
-
-    def _voiceclone(self, text, instruct, voice):
-        client = self._mimo_client()
-        v = voice or ''
-        if not v.startswith('data:'):
-            raise RuntimeError('音色克隆需要 audio.voice 传参考音频的 DataURL')
-        self._say('音色克隆中…')
-        c = client.chat.completions.create(
-            model='mimo-v2.5-tts-voiceclone',
-            messages=[{'role': 'user', 'content': instruct},
-                      {'role': 'assistant', 'content': text}],
-            audio={'format': 'wav', 'voice': v},
-        )
-        return self._audio_bytes(c), (self._audio_meta(c).get('id') or '')
-
-    # ---------- 高级：设计 / 克隆一个音色并保存
+    # ---------- 音色工作台（声音设计 / 声音复刻）：后端已移除（#9）
     #
-    # 重要（实测 2026-10）：voicedesign / voiceclone 返回的 id **不能**当 voice
-    # 传给普通 mimo-v2.5-tts（会报 "Unknown voice: <id>"）。
-    # 所以自定义音色必须记住「怎么重新造出来」：
-    #   design 音色  -> 存 instruct（风格描述）
-    #   clone  音色  -> 把参考音频**持久化保存**，每次合成重新克隆
-    # 这也是 _preset() 里给它们打 kind 标记的原因。
-    def design_voice(self, name, instruct, sample_text=None):
-        text = sample_text or TEST_SAMPLES['en']
-        data, vid = self._voicedesign(text, instruct)
-        p = (self.cache_dir or Path('.')) / f'design_{hashlib.sha1(name.encode()).hexdigest()[:8]}.wav'
-        p.write_bytes(data)
-        return {'ok': True, 'voiceId': vid, 'file': str(p), 'name': name,
-                'instruct': instruct, 'kind': 'design'}
+    # 删除的东西（历史上都在这里）：_voicedesign（文字描述造音色）、_voiceclone（参考音频克隆）、
+    # _as_dataurl、design_voice、clone_voice、_design_voice_instruct，以及 synthesize 里
+    # 「kind=design/clone」「模型名以 voicedesign/voiceclone 结尾」的四条特殊分支。
+    # 连带失效：voices.json 里的 design_/clone_ 条目、kind/refAudio/voiceId 字段、
+    # ttsEngineModels 里指向 voicedesign/voiceclone 的值（后者由 aliases 自动映射）。
+    #
+    # 保留同名方法只为给 app.py 侧同步删除留过渡（否则 AttributeError 裸栈直接漏到前端）。
+    def design_voice(self, *a, **kw):
+        raise RuntimeError('「声音设计」已下线（音色工作台整块移除）——请在语音输出里直接选模型自带的音色')
 
-    def clone_voice(self, name, ref_audio_path, instruct=None, sample_text=None):
-        src = Path(ref_audio_path)
-        if not src.exists():
-            raise RuntimeError('参考音频不存在：' + str(src))
-        # 持久化一份参考音频（放 voices/ 下，不会被缓存清理）
-        keep_dir = (self.cache_dir or Path('.')) / 'voices'
-        keep_dir.mkdir(parents=True, exist_ok=True)
-        kept = keep_dir / f'ref_{hashlib.sha1(name.encode()).hexdigest()[:8]}{src.suffix or ".wav"}'
-        if str(src.resolve()) != str(kept.resolve()):
-            kept.write_bytes(src.read_bytes())
-
-        durl = self._as_dataurl(kept)
-        text = sample_text or TEST_SAMPLES['en']
-        ins = instruct or 'A natural, clear voice.'
-        data, vid = self._voiceclone(text, ins, durl)
-        p = (self.cache_dir or Path('.')) / f'clone_{hashlib.sha1(name.encode()).hexdigest()[:8]}.wav'
-        p.write_bytes(data)
-        return {'ok': True, 'voiceId': vid, 'file': str(p), 'name': name,
-                'instruct': ins, 'kind': 'clone', 'refAudio': str(kept)}
-
-    def _design_voice_instruct(self, preset):
-        return preset.get('instruct') or 'A clear voice.'
+    def clone_voice(self, *a, **kw):
+        raise RuntimeError('「声音复刻」已下线（音色工作台整块移除）——请在语音输出里直接选模型自带的音色')
 
     # ---------- Edge TTS
     def _edge(self, text, voice, rate=None):
@@ -592,35 +627,73 @@ class TTS:
         except ImportError:
             raise RuntimeError('用 Edge TTS 需要先装：pip install edge-tts')
         import asyncio
+        import uuid
         import edge_tts
         if not voice or voice.startswith('Chinese (Mandarin)'):
             voice = 'en-US-AriaNeural'
-        rate = rate or self.cfg.get('edgeRate') or '-10%'
-        tmp = (self.cache_dir or Path('.')) / '_edge_tmp.mp3'
+        # 曾经默认 '-10%'：单词被拖慢一成，跟读示范和单词读音两个速度，越听越糊。
+        # 单词读音必须跟原速（+0%），rate 只在显式传值时生效。2026-10-16 修复。
+        rate = rate or self.cfg.get('edgeRate') or '+0%'
+        # 唯一临时文件：曾经的固定名 _edge_tmp.mp3 会被并发调用互相覆盖
+        # （VREV 队列自动播 + 用户点词同时合成 → 音频串音/截断）。2026-10-16 修复。
+        tmp = (self.cache_dir or Path('.')) / f'_edge_{uuid.uuid4().hex[:8]}.mp3'
+        wav = tmp.with_suffix('.wav')
         async def go():
             await edge_tts.Communicate(text, voice, rate=rate).save(str(tmp))
-        asyncio.run(go())
-        if not tmp.exists():
-            raise RuntimeError('Edge TTS 没生成文件')
-        wav = tmp.with_suffix('.wav')
-        ff = find_ffmpeg()
-        if ff:
-            subprocess.run([ff, '-hide_banner', '-loglevel', 'error', '-y',
-                            '-i', str(tmp), str(wav)],
-                           capture_output=True, creationflags=_no_window())
-            if wav.exists():
-                tmp.unlink(missing_ok=True)
-                return wav.read_bytes()
-        return tmp.read_bytes()
+        try:
+            asyncio.run(go())
+            if not tmp.exists() or tmp.stat().st_size == 0:
+                raise RuntimeError('Edge TTS 没生成文件')
+            ff = find_ffmpeg()
+            if not ff:
+                # 没 ffmpeg：明确告诉用户，而不是静默返回 mp3 塞进 .wav 缓存
+                # （扩展名/内容不符，localfs 按 .wav 发 audio/wav，WebView2 严格模式下静默失败）
+                raise RuntimeError('没找到 ffmpeg，Edge 合成结果无法转成 wav（装 ffmpeg 并加进 PATH 后重试）')
+            r = subprocess.run([ff, '-hide_banner', '-loglevel', 'error', '-y',
+                                '-i', str(tmp), '-ar', '24000', '-ac', '1', str(wav)],
+                               capture_output=True, creationflags=_no_window())
+            if not (wav.exists() and wav.stat().st_size > 0):
+                # 曾经的漏洞：ffmpeg 失败后继续 wav.read_bytes() → FileNotFoundError
+                # 裸栈抛到前端。现在给一句人话（含 ffmpeg 自己的报错尾巴）。2026-10-16 修复。
+                tail = (r.stderr or b'').decode('utf-8', 'replace').strip().splitlines()
+                raise RuntimeError('ffmpeg 转 wav 失败：' + (tail[-1][:120] if tail else '无输出，检查 ffmpeg 是否可用'))
+            return wav.read_bytes()
+        finally:
+            tmp.unlink(missing_ok=True)
+            wav.unlink(missing_ok=True)
 
     # ---------- 给界面用
-    def list_presets(self):
+    def list_presets(self, provider=None):
+        """当前引擎下「音色下拉」要显示的东西。
+
+        · mimo / volc / siliconflow / custom（OpenAI 兼容口）：风格预设（id + 风格指令）；
+        · edge / dashscope：真实音色名（来自注册表该模型系的音色表），首项是
+          「默认（留空）」——留空就用该系默认音色，用户不必被一堆音色吓到。
+        曾经这里对任何引擎都返回 MiMo 的 23 个风格预设：选了阿里云看到的还是
+        Chloe/Mia/Dean，真正发出去的却是被映射后的 Cherry——「音色对不上」的观感来源。
+        """
+        provider = (provider or self._provider()).lower()
+        try:
+            import speech_providers as _spv
+        except Exception:
+            _spv = None
+        real_voice = bool(_spv) and bool(_spv.tts_voices(provider, self._eff_model(provider) if _spv else None,
+                                                         with_default=False))
+        if real_voice:
+            model = self._eff_model(provider)
+            out = []
+            for v in _spv.tts_voices(provider, model):
+                out.append({'id': v.get('id') or '', 'name': v.get('label') or v.get('id') or '',
+                            'desc': v.get('desc') or '', 'group': v.get('group') or '当前引擎音色',
+                            'family': v.get('family') or ''})
+            return out
         out = [{'id': p['id'], 'name': p['name'], 'desc': p['desc'],
                 'group': p.get('group') or '其它'} for p in VOICE_PRESETS]
+        # 练习页的「自定义风格」仍可用；design_/clone_ 已在 __init__ 里过滤
         for p in self.extra_presets:
             out.append({'id': p.get('id'), 'name': p.get('name'),
                         'desc': p.get('desc') or '', 'group': p.get('group') or '我的音色',
-                        'custom': True, 'kind': p.get('kind')})
+                        'custom': True})
         return out
 
     def test(self):

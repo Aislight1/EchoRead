@@ -292,6 +292,10 @@
   .w.wrong { color:var(--bad); text-decoration:underline wavy var(--bad); }
   .w.missed { color:var(--mut); text-decoration:line-through; }
   .w.extra { color:var(--warn); }
+  /* 跟读卡拉OK：当前正在播的词（词级时间戳来自 .words.json）。
+     用背景色而非文字色，避免与上面 .ok/.wrong/.saved 的语义标记打架。 */
+  .w.on { background:color-mix(in srgb,var(--acc) 30%,transparent);
+    border-color:var(--acc); border-radius:8px; }
 
   .recrow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
   .meter { flex:1 1 160px; height:8px; border-radius:99px; background:var(--card3); overflow:hidden; min-width:120px; }
@@ -550,6 +554,37 @@ input[type=checkbox], input[type=radio] { width:15px; height:15px; margin:0; }
   background-size:200% 100%; animation:skel 1.4s ease-in-out infinite; }
 .skel.lg { height:56px; border-radius:12px; }
 @keyframes skel { from { background-position:100% 0; } to { background-position:-100% 0; } }
+
+/* #3：LLM 纠音「点下去就亮起来」——按钮呼吸 + 诊断卡立刻亮框（用户要能看出已经开始跑） */
+#btnDiagLLM.diag-busy { cursor:progress; opacity:1;
+  color:var(--purple); border-color:color-mix(in srgb,var(--purple) 55%,transparent);
+  background:color-mix(in srgb,var(--purple) 14%,transparent);
+  animation:diagBreath 1.5s ease-in-out infinite; }
+#btnDiagLLM.diag-busy:disabled { opacity:1; }
+@keyframes diagBreath {
+  0%,100% { box-shadow:0 0 0 0 color-mix(in srgb,var(--purple) 0%,transparent); }
+  50%     { box-shadow:0 0 0 6px color-mix(in srgb,var(--purple) 20%,transparent); }
+}
+#diagCard.diag-running { border-color:color-mix(in srgb,var(--purple) 45%,transparent);
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--purple) 20%,transparent), 0 10px 30px color-mix(in srgb,var(--purple) 10%,transparent); }
+#diagCard.diag-done { border-color:color-mix(in srgb,var(--ok) 40%,transparent); }
+#diagCard.diag-done h3::before { background:var(--ok); }
+.diag-run-hint { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--purple); }
+.diag-run-hint .spin { width:13px; height:13px; border-radius:50%; flex:none;
+  border:2px solid color-mix(in srgb,var(--purple) 28%,transparent); border-top-color:var(--purple);
+  animation:sp .8s linear infinite; }
+
+/* #4：句子清单弹窗（练习页 / 听力页共用，句子多时按序号或英文挑一句跳过去） */
+#sentJumpList { max-height:52vh; overflow:auto; border:1px solid var(--line); border-radius:10px; padding:4px; background:var(--bg2); }
+#sentJumpList .sj-row { display:flex; gap:10px; align-items:flex-start; padding:6px 9px; border-radius:8px;
+  cursor:pointer; font-size:13px; line-height:1.55; }
+#sentJumpList .sj-row:hover { background:var(--card2); }
+#sentJumpList .sj-row.on { background:color-mix(in srgb,var(--acc) 14%,transparent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--acc) 45%,transparent); }
+#sentJumpList .sj-row.cur .sj-no { color:var(--acc); font-weight:700; }
+#sentJumpList .sj-no { flex:none; width:46px; text-align:right; color:var(--mut);
+  font-variant-numeric:tabular-nums; font-size:12.5px; }
+#sentJumpList .sj-en { flex:1; }
 
 /* 遮罩 / toast */
 #busy { background:var(--busy); backdrop-filter:blur(3px); color:var(--mut); font-size:13px; }
@@ -977,7 +1012,6 @@ html[data-motion="light"] .skel { animation:none !important; }
       <div class="grp">
         <span class="lbl">音色</span>
         <select id="pVoice"></select>
-        <button class="btn ghost" id="btnAddVoice">+ 自定义音色</button>
       </div>
       <div class="grp">
         <span class="lbl">结果视图</span>
@@ -1012,11 +1046,16 @@ html[data-motion="light"] .skel { animation:none !important; }
       <div class="card">
         <h3>跟读这一句 <span class="sp"></span>
           <button class="btn good" id="btnOrig">▶ TED 原声</button>
+          <button class="btn ghost" id="btnRefReplay" title="重放当前参考音源（TED 原声 或 所选音色的合成）">🔁 参考</button>
+          <span class="kv" id="refSrc"></span>
           <label class="chk">语速</label>
           <select id="refRate">
             <option value="0.6">0.6×</option>
             <option value="0.75">0.75×</option>
             <option value="1" selected>1.0×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2.0×</option>
           </select>
         <button class="btn ghost" id="btnListen">🎙 合成示范</button>
         <button class="btn ghost" id="btnListenFast" title="用正常音色合成后 1.25× 播放（不变调，同款缓存不重复合成）">⚡ 合成快速</button>
@@ -1030,6 +1069,7 @@ html[data-motion="light"] .skel { animation:none !important; }
           <input type="number" id="pJump" min="1" style="width:58px" title="句子序号（回车或点→跳转）">
           <span class="kv">句</span>
           <button class="btn ghost" id="btnPJump">→</button>
+          <button class="btn ghost" id="btnSentList" title="句子清单：列出全部句子（序号+英文），可搜索、点一句直接跳">📋 句子清单</button>
         </h3>
         <audio id="refAudio" controls style="width:100%;height:34px"></audio>
         <div id="calBox" style="display:none;margin-top:8px;padding:10px 12px;border:1px dashed var(--line2);border-radius:10px;background:var(--bg2)">
@@ -1098,7 +1138,7 @@ html[data-motion="light"] .skel { animation:none !important; }
       </div>
 
       <div class="card" id="resultCard" style="display:none">
-        <h3>识别与比对 <span class="sp"></span><label class="chk"><input type="checkbox" id="useLLM" checked> 用 LLM 纠音</label>
+        <h3>识别与比对 <span class="sp"></span><button class="btn ghost" id="btnDiagLLM" style="display:none" title="点击后才生成纠音分析（原为自动执行，现改为手动，不点不耗 LLM 额度）">🧑‍🏫 生成 LLM 纠音</button>
           <span class="kv" id="asrEngTag" title="当前生效的识别引擎（设置 → 语音识别 改模型/供应商后即点即存，这里立即刷新）"></span></h3>
         <div class="scores">
           <div><div class="bigscore" id="sAcc">-</div><div class="kv">逐词准确率</div></div>
@@ -1154,6 +1194,7 @@ html[data-motion="light"] .skel { animation:none !important; }
         <input type="number" id="lJump" min="1" style="width:62px" title="句子序号（回车或点→跳转）">
         <span class="kv">句</span>
         <button class="btn ghost" id="btnLJump">→</button>
+        <button class="btn ghost" id="btnLSentList" title="句子清单：列出当前难度的句子（序号+英文），可搜索、点一句直接跳">📋 句子清单</button>
     </div>
     <main>
       <div class="card">
@@ -1319,9 +1360,12 @@ html[data-motion="light"] .skel { animation:none !important; }
       <button class="btn" id="plLoop">🔁 单句循环</button>
       <label class="chk">语速</label>
       <select id="plRate">
-        <option value="0.6">0.6×</option><option value="0.75">0.75×</option>
-        <option value="0.9">0.9×</option><option value="1" selected>1.0×</option>
-        <option value="1.15">1.15×</option><option value="1.3">1.3×</option>
+        <option value="0.6">0.6×</option>
+        <option value="0.75">0.75×</option>
+        <option value="1" selected>1.0×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2.0×</option>
       </select>
       <label class="chk"><input type="checkbox" id="plZh" checked> 中文</label>
       <label class="chk"><input type="checkbox" id="autoScroll" checked> 自动滚动</label>
@@ -1528,73 +1572,18 @@ html[data-motion="light"] .skel { animation:none !important; }
         <label class="chk"><input type="checkbox" id="openAfter"> 下载完成后自动打开文件夹</label>
       </div>
 
-      <div class="card">
-        <h3>音色工作台（试听 / 设计 / 克隆）</h3>
-        <!-- 供应商与密钥已并入上方「语音输出」卡；这些旧字段保留为隐藏元素，
-             存量读写逻辑（保存/加载/测速/拉模型）全部照常工作 -->
-        <span style="display:none">
-          <select id="ttsProvider"><option value="mimo"></option><option value="edge"></option>
-            <option value="dashscope"></option><option value="volc"></option>
-            <option value="siliconflow"></option><option value="openai"></option>
-            <option value="custom"></option></select>
-          <input type="password" id="mimoKey"><button id="btnEyeMimo">显示</button>
-          <input type="text" id="mimoBase"><input type="text" id="mimoModel">
-          <input type="text" id="mimoVoice">
-        </span>
-        <div class="hint">引擎与供应商在上方「语音输出」卡里选；这里管理<b>音色本身</b>：试听、文字设计、参考音频克隆。</div>
-        <div class="fld">
-          <label>测试朗读（挑音色用 —— 中英各读一遍）</label>
-          <div class="row">
-            <select id="testVoice" style="flex:1 1 260px"></select>
-            <button class="btn" id="btnTestEn">读英文</button>
-            <button class="btn" id="btnTestZh">读中文</button>
-            <button class="btn ghost" id="btnTestBoth">中英连读</button>
-          </div>
-          <div class="hint" id="testReadHint">选一个音色点「读英文 / 读中文」听效果。英文样本和中文样本各一段。</div>
-          <audio id="testAudio" controls style="width:100%;height:34px;margin-top:8px"></audio>
-        </div>
-        <div class="fld">
-          <label>高级音色：用文字设计一个音色（mimo-v2.5-tts-voicedesign）</label>
-          <div class="row">
-            <input type="text" id="dvName" placeholder="音色名称，如：可露希尔">
-          </div>
-          <div class="row" style="margin-top:6px">
-            <input type="text" id="dvInstruct" placeholder="英文描述，如：A cheerful young female voice, playful, medium-high pitch, light and quick.">
-            <button class="btn" id="btnDesignVoice">设计并试听</button>
-          </div>
-          <div class="hint">MiMo 会用这段描述生成音色，返回的 voiceId 会存进「我的音色」，之后能在练习页直接选。</div>
-        </div>
-        <div class="fld">
-          <label>高级音色：用一段参考音频克隆（mimo-v2.5-tts-voiceclone）</label>
-          <div class="hint" style="margin-bottom:7px">
-            <b>和「文字设计」的区别</b>：设计是靠一段文字描述<b>凭空造</b>一个音色；
-            克隆是<b>照着一段真人音频</b>复制音色 —— 想要某个具体的人的声音，用这个。
-            不需要训练，几秒钟就好。
-          </div>
-          <div class="row">
-            <input type="text" id="cvName" placeholder="音色名称，如：英文女声" style="flex:1 1 200px">
-            <select id="cvRefSelect" style="flex:2 1 300px">
-              <option value="">（选一段参考音频）</option>
-            </select>
-            <button class="btn ghost" id="btnPickAudio">选文件…</button>
-          </div>
-          <input type="text" id="cvPath" placeholder="参考音频路径（也可以手动粘）" style="width:100%;margin-top:6px">
-          <div class="row" style="margin-top:6px">
-            <input type="text" id="cvInstruct" placeholder="可选的风格描述（留空用默认）">
-            <button class="btn" id="btnCloneVoice">克隆并试听</button>
-          </div>
-          <div class="hint" id="cvHint">
-            参考音频建议 <b>3–10 秒、单人、干净无背景音乐</b>。
-            克隆后程序会把这段音频<b>复制保存</b>下来 —— 因为每次合成都需要它
-            （MiMo 返回的 voiceId 不能单独用来合成，这是它的接口限制）。
-          </div>
-          <audio id="cvAudio" controls style="width:100%;height:34px;margin-top:8px"></audio>
-        </div>
-        <div class="fld">
-          <label>我的音色</label>
-          <ul class="dlist" id="myVoiceList"></ul>
-        </div>
-      </div>
+      <!-- （#9）旧「音色工作台」卡已整张删除：试听 / 文字设计 / 参考音频克隆全部并入上方
+           「语音输出」总管理卡（带试听与音色下拉），这里不再重复一套入口。
+           下面这组旧字段只作隐藏读写载体保留——保存/加载/测速/拉模型仍在用，勿删。 -->
+      <span style="display:none">
+        <select id="ttsProvider"><option value="mimo"></option><option value="edge"></option>
+          <option value="dashscope"></option><option value="volc"></option>
+          <option value="siliconflow"></option><option value="openai"></option>
+          <option value="custom"></option></select>
+        <input type="password" id="mimoKey"><button id="btnEyeMimo">显示</button>
+        <input type="text" id="mimoBase"><input type="text" id="mimoModel">
+        <input type="text" id="mimoVoice">
+      </span>
 
       <!-- ============ 语音输出总管理 ============ -->
       <div class="card" id="speechHub">
@@ -1655,7 +1644,7 @@ html[data-motion="light"] .skel { animation:none !important; }
         <div class="fld">
           <label>每个场景单独指定引擎（留「跟随全局」即可）</label>
           <div class="row" id="spScenes"></div>
-          <div class="hint">比如：发音练习用 MiMo（英文口音标准），听力朗读用本地可露希尔。</div>
+          <div class="hint">比如：发音练习用阿里云 Qwen3-TTS（音色多、HTTP 稳定），听力朗读用 Edge（无需 Key）。</div>
         </div>
       </div>
 
@@ -1673,7 +1662,7 @@ html[data-motion="light"] .skel { animation:none !important; }
           <label>识别服务商</label>
           <select id="asrProvider">
             <option value="dashscope">阿里云 paraformer（带逐词时间戳，发音练习用）</option>
-            <option value="mimo">小米 MiMo-V2.5-ASR（更快更省，听力模式用）</option>
+            <option value="mimo">小米 MiMo-ASR（V2.5 已于 2026-10-21 下线，勿选）</option>
             <option value="doubao">豆包 Seed-ASR-2.0（接口预留，需申请 appid+token）</option>
             <option value="siliconflow">SiliconFlow 聚合（实验）</option>
             <option value="custom">自定义</option>
@@ -1815,6 +1804,7 @@ html[data-motion="light"] .skel { animation:none !important; }
         </div>
         <div class="testout" id="testOut" style="display:none"></div>
         <div class="hint" id="envInfo"></div>
+        <div class="hint" id="buildInfo" style="margin-top:6px"></div>
       </div>
     </main>
   </div>
@@ -1935,6 +1925,17 @@ html[data-motion="light"] .skel { animation:none !important; }
     <span class="kv">普通难度每句出题走一次 LLM（同句有缓存）；困难/地狱本地秒出</span>
   </div>
 </div>
+<!-- 🔎（#4）句子清单弹窗：练习页 + 听力页共用。句子一多，数字输入根本记不住是哪句，
+     这里把句子全列出来（序号 + 英文），可搜索、↑↓ 选、点一下/Enter 直接跳、Esc 关。 -->
+<div class="card ai" id="sentJumpCard" style="display:none;position:fixed;z-index:212;left:50%;top:9vh;transform:translateX(-50%);width:min(720px,94vw)">
+  <h3>🔎 句子清单 <span class="kv" id="sentJumpMeta"></span><span class="sp"></span>
+    <button class="btn ghost" id="btnSentJumpClose">关闭</button></h3>
+  <div class="row" style="gap:6px;margin-bottom:8px">
+    <input type="search" id="sentJumpSearch" placeholder="搜英文 / 序号（↑↓ 选择 · Enter 跳转 · Esc 关闭）" style="flex:1" autocomplete="off">
+    <button class="btn" id="btnSentJumpGo">跳到选中</button>
+  </div>
+  <div id="sentJumpList"></div>
+</div>
 <div class="card ai" id="itemStatCard" style="display:none;position:fixed;z-index:210;left:50%;top:56px;transform:translateX(-50%);width:min(680px,94vw);max-height:80vh;overflow:auto">
   <h3>📊 语料练习统计 <span class="sp"></span><span class="kv" id="istatTitle"></span>
     <button class="btn ghost" id="btnIstatClose">关闭</button></h3>
@@ -2012,7 +2013,13 @@ let LIB = [], CUR=null, INFO={}, RECS=[];
 let ISTATS=null;                     /* 语料维度练习统计（item_stats.json 的轻量 map） */
 let DMAP=null;                       /* 听力难度 map（difficulty.json，离线评级） */
 let SMAP=null;                       /* AI 摘要 map（item_summary.json） */
-let PR = { itemId:'', index:0, total:0, en:'', zh:'', refUrl:'', recUrl:'', recording:false };
+let PR = { itemId:'', index:0, total:0, en:'', zh:'', refUrl:'', recUrl:'', refKind:'', recording:false,
+           prevEn:'', nextEn:'', segBase:0, segWordOk:false };   /* segBase/segWordOk：refAudio.currentTime→原始音频时间 的换算基准
+                                              refKind：当前参考音源是 'orig'(TED 真人) 还是 'tts'(合成·某音色)
+                                              prevEn/nextEn：前后句英文，逐句精讲的上下文（后端 practice_sentence 已返回，
+                                              前端曾整条链路漏赋值 → 精讲永远拿不到上下文，逐句之间就不连贯） */
+let PR_WORDS = [];        /* 当前语料的词级时间戳（.words.json），[{w,s,e,i,sc}] */
+let PR_WMAP = null;       /* 本句的 DOM词序号→sidecar词序号 映射；null=未构建，false=不可用 */
 let PL = { cues:[], idx:-1, loop:false };
 const $ = id => document.getElementById(id);
 
@@ -2222,7 +2229,10 @@ function renderFixSync(){
   h+=r.items.map(x=>{
     const bad=x.flags.length>0;
     const sel=FIXSEL.has(x.index);
-    return '<div class="rec-item" data-fxrow="'+x.index+'" style="cursor:pointer;'+(bad?'border-left:3px solid var(--warn);':'')+(sel?'background:var(--hover-bg);':'')+'">'+
+    /* 选中态要给足反馈：accent 底色 + 左侧 accent 竖条 + 圆角（原来只有一层
+       hover-bg，和鼠标悬停分不清，用户看不到选了哪几句） */
+    return '<div class="rec-item'+(sel?' fxsel':'')+'" data-fxrow="'+x.index+'" style="cursor:pointer;'+
+      (bad&&!sel?'border-left:3px solid var(--warn);':'')+'">'+
       '<div style="width:120px" class="kv mono">'+fmtDur(x.start)+'→'+fmtDur(x.end)+'</div>'+
       '<div style="flex:1;min-width:0"><div>'+esc(x.text)+(bad?' <span class="pill warn">'+x.flags.map(f=>FLAG_TXT[f]||f).join('/')+'</span>':'')+'</div>'+
       '<div class="kv">'+x.words+' 词 · '+x.rate+' 词/秒</div></div>'+
@@ -2520,6 +2530,7 @@ async function renderLib(){
       ${sm.scene?`<div class="scene" title="${esc(sm.scene)}">◈ ${esc(sm.scene)}</div>`:''}
       <div class="kwrap">
         ${d?`<span class="lvl l${lvl}" title="语速 ${esc(String(d.rate))} 词/秒 · 句均 ${esc(String(d.avgLen))} 词">${esc(d.level+'·'+d.name)}</span>`:''}
+        ${x.sourceKindLabel?`<span class="tag" data-kind="${esc(x.id)}" title="素材类型：${esc(x.sourceKindLabel)}——点一下可以改。转写切句阈值、翻译风格按类型走（对话切得碎、读书允许长句）。">${esc(x.sourceKindLabel)}</span>`:''}
         ${(sm.topics||[]).map(t=>`<span class="topic" data-topic="${esc(t)}">#${esc(t)}</span>`).join('')}
         ${(x.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}
         ${ISTATS[x.id]?`<span class="pill" title="点击卡片右下的 📍 看统计">📍 第 ${(ISTATS[x.id].lastIndex||0)+1} 句 · ${ISTATS[x.id].rounds||0} 轮</span>`:''}
@@ -2537,6 +2548,7 @@ async function renderLib(){
         ${ISTATS[x.id]?`<button class="btn ghost" data-istat="${esc(x.id)}" title="练习统计">📍 统计</button>`:''}
         ${!x.hasEn?`<button class="btn ghost" data-mksub="${esc(x.id)}" title="语音转写+AI翻译补生成中英字幕">⚡ 生成字幕</button>`:''}
         ${x.hasEn?`<button class="btn ghost" data-doc="${esc(x.id)}" title="AI 诊断字幕问题（句子不拆/错词/缺中文）并自动修正，原字幕备份 .bak">🩺 诊断修正</button>`:''}
+        ${x.hasEn?`<button class="btn ghost" data-reseg="${esc(x.id)}" title="按语义完整段落重新切句：碎片并回完整句、超长句只在逗号/分号处切。原文备份 .bak2，中文按时间重叠重新配对，不重新转写、不花钱">✂ 重切句</button>`:''}
         <button class="btn ghost" data-calgo="${esc(x.id)}" title="读的句子和播的音频对不上？校准音同步">⏱ 同步</button>
         <button class="btn ghost" data-rename="${esc(x.id)}" title="修改这条语料的文件名（音频+字幕+统计一起改）">✏️ 改名</button>
         <button class="btn ghost" data-tag="${esc(x.id)}">🏷 标签</button>
@@ -2777,6 +2789,8 @@ $('list').addEventListener('click', async e=>{
   const p=e.target.closest('[data-practice]');
   if(p){ PR.itemId=p.dataset.practice; $('pItem').value=PR.itemId; PR.index=0; go('practice'); resumeHint(); return; }
   const tg=e.target.closest('[data-tag]'); if(tg) return editTags(tg.dataset.tag);
+  const kd=e.target.closest('[data-kind]'); if(kd) return editKind(kd.dataset.kind);
+  const rsg=e.target.closest('[data-reseg]'); if(rsg) return resegItem(rsg.dataset.reseg);
   const rv=e.target.closest('[data-reveal]');
   if(rv){ const it=LIB.find(x=>x.id===rv.dataset.reveal); const r=await api().reveal(it.audio); if(!r.ok) toast(r.msg||''); return; }
   const tu=e.target.closest('[data-tedurl]');
@@ -2790,6 +2804,68 @@ async function editTags(id){
   const r=await api().save_meta(id, t.split(/[,，]/).map(s=>s.trim()).filter(Boolean), n);
   if(r.ok){ toast('已保存'); await loadLib(true); } else toast(r.msg||'');
 }
+/* 素材类型：演讲/读书朗读/对话访谈/播客口播/未分类——不同类型切句与翻译策略不同 */
+let KIND_CACHE=null;
+async function editKind(id){
+  if(!KIND_CACHE){
+    try{ const r=await api().video_kinds(); KIND_CACHE=(r&&r.kinds)||[]; }catch(e){ KIND_CACHE=[]; }
+  }
+  if(!KIND_CACHE.length) return toast('读取类型清单失败');
+  const cur=LIB.find(x=>x.id===id)||{};
+  const lines=KIND_CACHE.map((k,i)=>`${i+1}. ${k.label}　${k.desc||''}`).join('\n');
+  const ans=prompt(`这条素材属于哪一类？（填序号，留空=按标题/来源自动猜）\n当前：${cur.sourceKindLabel||'未分类'}\n\n${lines}`, '');
+  if(ans===null) return;
+  const n=parseInt(String(ans).trim(),10);
+  let kind='';
+  if(String(ans).trim()!==''){
+    if(!(n>=1&&n<=KIND_CACHE.length)) return toast('序号不在范围内');
+    kind=KIND_CACHE[n-1].id;
+  }
+  const r=await api().set_item_kind(id, kind);
+  if(r.ok){
+    toast(`已设为「${r.label}」：以后这条重新转写/翻译会按 ${r.label} 的策略走${r.desc?'（'+r.desc+'）':''}`, 5000);
+    await loadLib(true);
+  } else toast(r.msg||'保存失败');
+}
+async function resegItem(id){
+  const it=LIB.find(x=>x.id===id)||{};
+  const ok=confirm('按「语义完整段落」重新切句？\n\n'+
+    '· 现在一条条的短句会合并成完整含义段落（读书/演讲 30~55 词，对话 20~30 词）\n'+
+    '· 超长句只在逗号/分号/破折号处切，不再从半个从句开始\n'+
+    '· 原文备份成 .en.vtt.bak2 / .zh.vtt.bak2，随时能撤回\n'+
+    '· 中文按时间重叠重新配对，.对照.md 一起重建\n\n'+
+    '只用本地已有字幕，不重新转写、不花钱。');
+  if(!ok) return;
+  const tag='reseg:'+id;
+  TaskFloat.add(tag,'✂ 重切句',(it.name||'')+' 正在按语义段落重组装…');
+  try{
+    const r=await api().item_resegment(id);
+    if(!r.ok){
+      TaskFloat.update(tag,'失败：'+(r.msg||''),true);
+      toast('重切失败：'+(r.msg||''),6000);
+      setTimeout(()=>TaskFloat.remove(tag),6000);
+      return;
+    }
+    if(!r.changed){
+      TaskFloat.update(tag,r.msg||'已经是语义段落，未改动',true);
+      setTimeout(()=>TaskFloat.remove(tag),4500);
+      toast(r.msg||'已经是语义段落，未改动',4500);
+      return;
+    }
+    TaskFloat.update(tag,'完成：'+(r.msg||'')+(r.zhCues!=null?'（中文 '+r.zhCues+' 条已重新配对）':''),true);
+    toast('重切完成：'+(r.msg||'')+'　原文已备份 .bak2',6000);
+    setTimeout(()=>TaskFloat.remove(tag),6000);
+    await loadLib(true);
+    if(PR.itemId===id && PR.total){            // 正在练这条：句号可能越界，夹到新长度内
+      PR.index=Math.max(0,Math.min(PR.index,(r.total||PR.total)-1));
+      loadSentence(PR.index);
+    }
+  }catch(e){
+    TaskFloat.update(tag,'失败：'+e,true);
+    setTimeout(()=>TaskFloat.remove(tag),6000);
+  }
+}
+
 async function delItem(id){
   const it=LIB.find(x=>x.id===id); if(!it) return;
   if(!confirm(`删除《${it.title}》？\n会删除音频和字幕文件。`)) return;
@@ -2809,9 +2885,17 @@ async function loadPracticeInfo(){
   try{
     INFO = await api().practice_info();
     const t=INFO.tts, a=INFO.asr, l=INFO.llm, r=INFO.recorder;
+    /* 识别引擎标签与 svcBar 都以 practice_info 回传的真值为准：
+       设置页即改即存后再进练习页，这里会显示新模型（不再残留 paraformer-realtime-v2） */
+    window._ASRM={provider:a.provider||'dashscope', model:a.model||''};
+    /* 合成标签按真实引擎显示：MiMo V2.5 下线后不能再把所有引擎都写成「MiMo 模型名」 */
+    const _ttsName = t.engine==='edge' ? 'Edge TTS'
+      : (t.engine==='dashscope' ? 'Qwen TTS'
+      : (t.engine==='mimo' ? 'MiMo' : (t.provider||'合成')));
+    const _ttsDesc = t.engine==='edge' ? _ttsName : (_ttsName+' '+(t.model||''));
     $('svcBar').innerHTML = [
-      ['合成', t.hasKey, t.hasKey? (t.provider==='edge'?'Edge TTS':'MiMo '+t.model) : '未配 key'],
-      ['识别', a.hasKey, a.hasKey? a.model : '未配 key'],
+      ['合成', t.hasKey, t.hasKey? _ttsDesc : '未配 key'],
+      ['识别', a.hasKey, a.hasKey? (a.model||'未设置模型') : '未配 key'],
       ['纠错', l.ready, l.ready? l.model : '未配 LLM'],
       ['录音', r.ok, r.ok?'可用':r.msg],
     ].map(([n,ok,d])=>`<span class="s ${ok?'ok':'no'}"><span class="dot"></span>${n}：${esc(d)}</span>`).join('');
@@ -2819,11 +2903,27 @@ async function loadPracticeInfo(){
       `<option value="${esc(p.id)}"${p.id===INFO.presetId?' selected':''}>${esc((p.group?p.group+' · ':'')+p.name)}${p.custom?' ★':''}</option>`).join('');
     $('vocabCount').textContent = (INFO.vocabStats||{}).total || 0;
     refreshNavBadges();
+    /* #7 设备选择不再被抹回系统默认：以“用户锁定的设备”为准（后端 rec_devices 回传
+       current，settings 里叫 micDevice），没有保存值才落回 dv.default。
+       列表读不到/为空时保留现有选项，别把用户选好的设备清成「无可用设备」。 */
     const dv = await api().rec_devices();
-    if(dv.ok){
+    if(dv && dv.ok && (dv.devices||[]).length){
+      const savedV = (dv.current!=null && dv.current!=='') ? dv.current
+                   : ((INFO && INFO.micDevice!=null && INFO.micDevice!=='') ? INFO.micDevice : null);
+      const hasSaved = savedV!=null && dv.devices.some(d=>String(d.index)===String(savedV));
+      const pick = String(hasSaved ? savedV : dv.default);
+      /* 存过的那台拔了 → 回落到默认，但留一个「（已拔出）」占位项说明为什么换了 */
+      const gone = (savedV!=null && !hasSaved)
+        ? `<option value="${esc(String(savedV))}" disabled>[${esc(String(savedV))}] 之前用的设备（已拔出）</option>` : '';
+      $('pDev').innerHTML = gone + dv.devices.map(d=>
+        `<option value="${d.index}"${String(d.index)===pick?' selected':''}>[${d.index}] ${esc(d.name)}</option>`).join('');
+    } else if(dv && (dv.devices||[]).length){
+      /* ok=false 但给了列表：照样别清空选择 */
       $('pDev').innerHTML = dv.devices.map(d=>
-        `<option value="${d.index}"${d.index===dv.default?' selected':''}>[${d.index}] ${esc(d.name)}</option>`).join('');
-    } else { $('pDev').innerHTML = '<option value="">（无可用设备）</option>'; }
+        `<option value="${d.index}">[${d.index}] ${esc(d.name)}</option>`).join('');
+    } else if(!$('pDev').options.length){
+      $('pDev').innerHTML = '<option value="">（无可用设备）</option>';
+    }
   } finally { busy(false); }
 }
 async function loadSentence(i){
@@ -2832,16 +2932,23 @@ async function loadSentence(i){
   const r = await api().practice_sentence(PR.itemId, i);
   if(!r.ok){ toast(r.msg||'取句失败'); return; }
   PR.index=r.index; PR.total=r.total; PR.en=r.en; PR.zh=r.zh||''; PR.refUrl='';
+  PR.prevEn=r.prevEn||''; PR.nextEn=r.nextEn||'';   /* H-05 修复：后端一直返回 prevEn/nextEn，前端从未接住——精讲因此丢了上下文 */
   PR.start=r.start||0; PR.end=r.end||0; PR.audioUrl=r.audioUrl||''; PR.origEnd=null;
+  PR.segWordOk=false; markWordAt(-1);   /* 换句：清掉上一句的词高亮 */
   SA_TMP=0; saSyncUI();                 /* 换句=放弃未保存的单句校准（PR.start/end 回磁盘真值） */
   $('pIdx').textContent = r.index+1; $('pTot').textContent = r.total;
   $('pZh').textContent = r.zh ? ('中文：'+r.zh) : '';
   renderWords();
+  loadWords(PR.itemId);   /* 词级时间戳：异步拉取，失败静默（逐词高亮是增强功能） */
   AudioMgr.stopAll();                  /* 跳句：停掉一切在播的声音（原声/单词音/讲解音/连读） */
   if(typeof CHAIN!=='undefined' && CHAIN){ CHAIN=null; const bc=$('btnChain'); if(bc) bc.textContent='📢 连读'; }
   $('refAudio').removeAttribute('src');
+  setRefSrc('');                       /* 换句：清掉上一句的参考音源标注 */
   $('resultCard').style.display='none';
   $('diagCard').style.display='none';
+  /* #3：换句必须复位纠音按钮——否则上一句还在跑/已跑过时切句，
+     按钮会永久卡在「正在纠音…」且禁用，再也点不动。 */
+  diagLLMReset(); $('btnDiagLLM').style.display='none';
   $('recHint').textContent='';
   PR.recFile='';
   PR.marks = {};                       /* 清旧句划线 */
@@ -2850,19 +2957,107 @@ async function loadSentence(i){
 }
 function renderWords(){
   const marks = PR.marks || {};
+  let k = 0;                            /* data-k：仅对「可成词」的 token 递增，与 buildWordMap 同口径 */
   $('words').innerHTML = PR.en.split(/(\s+)/).map(tok=>{
     if(/^\s*$/.test(tok)) return tok;
     const clean = tok.replace(/^[^A-Za-z0-9']+|[^A-Za-z0-9']+$/g,'');
     if(!clean) return `<span class="w">${esc(tok)}</span>`;
     const st = marks[clean.toLowerCase()] || '';
-    return `<span class="w ${st}${PR.savedWords&&PR.savedWords.has(clean.toLowerCase())?' saved':''}" data-w="${esc(clean)}">${esc(tok)}</span>`;
+    const saved = PR.savedWords&&PR.savedWords.has(clean.toLowerCase())?' saved':'';
+    return `<span class="w ${st}${saved}" data-k="${k++}" data-w="${esc(clean)}">${esc(tok)}</span>`;
   }).join('');
+  PR_WMAP = null;                       /* 句子变了 → 词映射作废，下次播放时重建 */
+  markWordAt(-1);
+}
+
+/* ===== 词级时间戳（卡拉OK 逐词高亮）=====
+   .words.json 由 doctor 阶段 3.5 的 local_align 强制对齐产出，词时间是
+   「相对原始音频起点」的秒，未叠加校准偏移。这里只管按播放位置高亮，
+   不改任何时间数据。 */
+
+/* 与 Python local_align.norm_words 完全一致的归一化：
+   只取 [A-Za-z']+，小写，去首尾撇号。必须一致，否则词序号会错位。 */
+function normWordsPy(text){
+  const out=[]; const re=/[A-Za-z']+/g; const low=String(text||'').toLowerCase();
+  let m;
+  while((m=re.exec(low))!==null){
+    const w=m[0].replace(/^'+|'+$/g,'');
+    if(w) out.push(w);
+  }
+  return out;
+}
+
+/* 建立 DOM 词序号(data-k) → .words.json 词序号 的映射。
+   仅在「本句渲染出的归一化词序列」与「sidecar 里该句的词序列」长度一致时启用，
+   长度不一致说明字幕被改过或 sidecar 过期 → 宁可不亮，也不能错亮到别的词。 */
+function buildWordMap(){
+  const ws = (PR_WORDS||[]).filter(w => +w.i === +PR.index);
+  if(!ws.length) return null;
+  const pyDom = normWordsPy(PR.en);
+  if(pyDom.length !== ws.length) return null;      /* 口径不符 → 不启用 */
+  const map = [];                                   /* map[data-k] = sidecar 词序号 */
+  let pi = 0;
+  for(const tok of PR.en.split(/(\s+)/)){
+    if(/^\s*$/.test(tok)) continue;
+    const clean = tok.replace(/^[^A-Za-z0-9']+|[^A-Za-z0-9']+$/g,'');
+    if(!clean) continue;                            /* renderWords 里不占 data-k */
+    const sub = normWordsPy(tok);
+    if(!sub.length){ map.push(-1); continue; }      /* 纯数字等 Python 会丢弃的 token */
+    map.push(pi); pi += sub.length;
+  }
+  return (pi === ws.length) ? { ws, map } : null;
+}
+
+/* absT = 未叠加校准偏移的「原始音频绝对时间」（秒）。
+   传 -1 表示清除高亮。 */
+function markWordAt(absT){
+  const el = $('words'); if(!el) return;
+  if(absT == null || absT < 0){ 
+    el.querySelectorAll('.w.on').forEach(x=>x.classList.remove('on'));
+    return;
+  }
+  if(PR_WMAP === null) PR_WMAP = buildWordMap() || false;   /* false = 已判定不可用，不重复构建 */
+  if(!PR_WMAP){ 
+    el.querySelectorAll('.w.on').forEach(x=>x.classList.remove('on'));
+    return;
+  }
+  const { ws, map } = PR_WMAP;
+  let hit = -1;
+  for(let i=0;i<ws.length;i++){
+    if(absT >= +ws[i].s && absT < +ws[i].e){ hit = i; break; }
+  }
+  el.querySelectorAll('.w[data-k]').forEach(x=>{
+    const k = +x.dataset.k;
+    x.classList.toggle('on', hit >= 0 && map[k] === hit);
+  });
+}
+
+/* 换句/换语料时拉取词级时间戳（失败静默：词级高亮是增强，不是必需） */
+async function loadWords(itemId){
+  PR_WORDS = []; PR_WMAP = null;
+  if(!itemId) return;
+  try{
+    const r = await api().read_words(itemId);
+    if(!r || !r.ok || r.stale){ PR_WORDS = []; return; }
+    PR_WORDS = r.words || [];
+  }catch(e){ PR_WORDS = []; }
 }
 $('words').addEventListener('click', e=>{
   const w=e.target.closest('.w[data-w]'); if(!w) return;
   openWordDrawer(w.dataset.w);
 });
 $('pItem').addEventListener('change', async ()=>{ PR.itemId=$('pItem').value; PR.index=0; await loadSentence(0); resumeHint(); });
+/* 跳转到指定语料/句子的发音练习（听力判卷·校准卡·语料统计·句收藏·AI任务等 6 处入口调用；
+   此前全文件无定义，点击即 ReferenceError 静默失败。2026-10-16 修复。） */
+async function openPracticeSentence(itemId, idx){
+  idx = Math.max(0, +idx || 0);
+  if(itemId && itemId !== PR.itemId){ PR.itemId = itemId; PR.total = 0; }
+  const sel = $('pItem');
+  if(sel && Array.prototype.some.call(sel.options, o=>o.value===PR.itemId)) sel.value = PR.itemId;
+  if(!Object.keys(INFO).length) await loadPracticeInfo();
+  if(!PR.total){ PR.index = idx; go('practice'); }      /* ensurePractice 会直接加载目标句 */
+  else { go('practice'); await loadSentence(idx); }     /* 已有句则显式跳句（服务端对越界钳位） */
+}
 /* 断点续练：这个语料练过则提示上次位置，可一键跳过去 */
 function resumeHint(){
   try{
@@ -2874,7 +3069,6 @@ function resumeHint(){
 $('btnPrev').addEventListener('click', ()=>loadSentence(Math.max(0,PR.index-1)));
 $('btnNext').addEventListener('click', ()=>loadSentence(PR.index+1));
 $('pVoice').addEventListener('change', async ()=>{ await api().set_dirs(); });
-$('btnAddVoice').addEventListener('click', addCustomVoice);
 
 async function ttsPlay(slow, fast){
   if(!PR.en) return;
@@ -2886,13 +3080,20 @@ async function ttsPlay(slow, fast){
   }
   busy(true, fast?'合成（快速）中…':'合成示范中…');
   try{
-    const preset = slow ? 'slow_teacher' : ($('pVoice').value||'narrator');
+    /* H-03：参考音源必须跟「音色」下拉一致——慢速只降播放速度，不换音色。
+       曾经 slow 强制切到 slow_teacher（voice 固定 Chloe），用户选了别的音色点「🐢 合成慢速」
+       听到的是另一个人，正是「用这个音色练、拿另一个音色对比」。
+       想用「慢速教学」这个音色，下拉「跟读主力」组里本来就有，自己选即可。 */
+    const preset = $('pVoice').value || 'narrator';
     const r = await api().tts_speak(PR.en, preset);
     if(!r.ok) return errToast('合成失败：'+(r.msg||''));
     PR.refUrl=r.url; PR.origEnd=null;
+    PR.segWordOk = false;      /* TTS 语音的时间轴与真人原声不同，词级时间戳对它无效 */
+    markWordAt(-1);
     const a=$('refAudio');
     if(a.getAttribute('src')!==r.url) a.src=r.url;   /* 换句会清 src：必须重新挂上，否则 play() 拒绝被吞=无声 */
-    AudioMgr.play(a, fast?1.25:(slow?0.85:1));       /* 快速=1.25× 播放（不变调）；慢速走 slow_teacher 音色 */
+    setRefSrc('tts', preset);
+    AudioMgr.play(a, fast?1.25:(slow?0.85:1));       /* 快速=1.25×；慢速=0.85×（不变调，音色不变） */
   } finally { busy(false); }
 }
 $('btnListen').addEventListener('click', ()=>ttsPlay(false));
@@ -2905,6 +3106,27 @@ let CAL={};
 let CAL_OPEN_REQ=false;              /* 从语料库「⏱ 同步」跳来时自动展开校准面板 */
 function calOff(itemId){ const v=CAL[itemId||PR.itemId]; return (typeof v==='number'&&!isNaN(v))?v/1000:0; }
 let _lastSegReq='', _lastSegAt=0;
+/* H-03（界面侧根治）：参考音源标注与一键重放。
+   老 bug 的成因是「用合成音练、拿真人原声对比」而界面上看不出来源，
+   所以除了修合成音色，还必须让用户随时看见「我现在跟的是谁」。 */
+function refVoiceName(pid){
+  const sel = $('pVoice');
+  if(!sel) return pid||'';
+  const o = Array.from(sel.options).find(x=>x.value===pid);
+  return o ? o.textContent.replace(/\s*★$/,'') : (pid||'');
+}
+function setRefSrc(kind, pid){
+  PR.refKind = kind || '';
+  const el = $('refSrc');
+  if(!el) return;
+  if(kind==='tts')       el.textContent = '参考：合成 · ' + refVoiceName(pid);
+  else if(kind==='orig') el.textContent = '参考：TED 原声';
+  else                   el.textContent = '';
+}
+$('btnRefReplay') && $('btnRefReplay').addEventListener('click', ()=>{
+  if(PR.refKind==='orig') return playOrigSeg();
+  return ttsPlay(false);      /* 默认合成：跟「音色」下拉走 */
+});
 async function playOrigSeg(){
   if(!PR.audioUrl) return toast('这一句没有可用的原声');
   /* P2-3：快速切句/连点的原子性守卫——300ms 内同句重复请求直接忽略，
@@ -2914,13 +3136,22 @@ async function playOrigSeg(){
   _lastSegReq=sig; _lastSegAt=Date.now();
   const off=calOff();
   const a=$('refAudio');
+  setRefSrc('orig');          /* H-03：明确标注「现在跟的是 TED 真人原声」 */
   let segS=Math.max(0,(PR.start||0)+off);
   let segE=(PR.end||0)+off+0.15;
   if(!(segE>segS)) segE=segS+0.3;                 /* 烂时间轴防御：倒/零时长句保底 0.3s，不再无声或乱跳 */
   /* 优先服务端切段（精确），失败回落整文件 seek；rate 跟随倍速下拉实时生效 */
   const rate=parseFloat(($('refRate')||{}).value)||1;
   PR.origEnd=null;
+  /* 词级高亮的坐标基准：absT = PR.segBase + refAudio.currentTime
+     - 服务端切段：音频从 0 播起，absT = PR.start + currentTime  → segBase = PR.start
+     - 回落整文件 seek：currentTime 已是「含校准偏移的绝对时间」，
+       absT 要回到「未偏移的原始音频时间」→ segBase = -off
+     词级时间戳同为未偏移坐标，所以两者必须对齐到同一基准，否则整体偏 off。 */
+  PR.segBase = PR.start||0;
+  PR.segWordOk = true;      /* 真人原声：词级时间戳有效 */
   if(await origSegPlay(a, PR.itemId, segS, segE, rate)) return;
+  PR.segBase = -off;
   PR.origEnd=segE;
   if(a.src!==PR.audioUrl) a.src=PR.audioUrl;
   AudioMgr.playOrigSeg(a, segS, PR.origEnd);
@@ -2974,6 +3205,21 @@ let CAL_TMP=0, SA_TMP=0;
 function saSyncUI(){ const v=$('saVal'); if(v) v.textContent=Math.round(SA_TMP)+' ms';
   const n=$('saIdx'); if(n) n.textContent=(PR.index||0)+1; }
 /* 🔗✂ 句级手动合并/拆分（用户排期①）：直接落盘字幕（.bak2 可回滚），换句自动重载 */
+/* #2：合并/拆分会改句子总数与句序 —— PR.total / 当前句 / 句子清单与听力列表缓存必须一起刷新，
+   否则弹窗和听力页还拿旧序号跳，跳过去就串句（用户说的“合并后反而在前面多出一句”
+   若后端索引正确，前端这边的残留就是这些缓存）。 */
+async function afterSentStructChange(){
+  SJ.rows=[]; SJ.view=[];                     /* 句子清单缓存作废，下次打开重新取 */
+  if(!L.itemId || L.itemId!==PR.itemId || !L.list.length) return;
+  try{
+    const old=(L.list[L.pos]&&L.list[L.pos].index!=null)?L.list[L.pos].index:-1;
+    const lr=await api().listen_sentences(L.itemId, $('lLevel').value, 300, 0);
+    if(!lr.ok) return;
+    L.list=lr.items||[]; $('lTot').textContent=L.list.length;
+    const at=L.list.findIndex(x=>x.index===old);
+    L.pos = at<0 ? Math.min(L.pos, Math.max(0, L.list.length-1)) : at;
+  }catch(e){}
+}
 $('btnSentMerge').addEventListener('click', async ()=>{
   if(!(PR.total>0)) return toast('先选一个语料');
   if(PR.index<1) return toast('已经是第一句，前面没有可合并的句子');
@@ -2981,7 +3227,7 @@ $('btnSentMerge').addEventListener('click', async ()=>{
   busy(true,'合并落盘中…');
   try{
     const r=await api().sentence_merge(PR.itemId, PR.index);
-    if(r.ok){ toast('已合并（现在 '+r.total+' 句），回到合并后的句子'); await loadSentence(r.index); }
+    if(r.ok){ toast('已合并（现在 '+r.total+' 句），回到合并后的句子'); await loadSentence(r.index); await afterSentStructChange(); }
     else errToast(r.msg||'合并失败');
   } finally{ busy(false); }
 });
@@ -2996,7 +3242,7 @@ $('btnSentSplit').addEventListener('click', async ()=>{
   busy(true,'拆分落盘中…');
   try{
     const r=await api().sentence_split(PR.itemId, PR.index, k);
-    if(r.ok){ toast('已拆成：「'+(r.front||'')+'」＋「'+(r.back||'').slice(0,20)+'…」'); await loadSentence(r.index); }
+    if(r.ok){ toast('已拆成：「'+(r.front||'')+'」＋「'+(r.back||'').slice(0,20)+'…」'); await loadSentence(r.index); await afterSentStructChange(); }
     else errToast(r.msg||'拆分失败');
   } finally{ busy(false); }
 });
@@ -3061,8 +3307,15 @@ $('calBox').addEventListener('click', async e=>{
   }
 });
 $('refAudio').addEventListener('timeupdate', ()=>{
+  const a = $('refAudio');
+  /* 卡拉OK 逐词高亮：absT 先换算到「未叠加校准偏移的原始音频时间」再比 */
+  if(PR_WORDS.length && PR.segWordOk) markWordAt((PR.segBase||0) + (a.currentTime||0));
   if(PR.origEnd==null) return;
-  AudioMgr.checkSeg($('refAudio'));   /* 到截取终点自动暂停归位（token 防旧状态残留） */
+  AudioMgr.checkSeg(a);   /* 到截取终点自动暂停归位（token 防旧状态残留） */
+});
+$('refAudio').addEventListener('pause', ()=>{
+  /* 暂停/播完还留着最后一个词的高亮，会让人误以为还在播 */
+  markWordAt(-1);
 });
 
 /* ---------- ⚡ 快速训练 ---------- */
@@ -3223,6 +3476,19 @@ $('btnRecCancel').addEventListener('click', async ()=>{
   toast('已取消录音');
 });
 $('btnReloadDev').addEventListener('click', ()=>loadPracticeInfo());
+/* #7 换设备立刻落盘（save_settings 白名单含 micDevice，后端 rec_start 缺省也读它）：
+   下次进练习页、甚至直接点录音都用这台，不会再被重置成系统默认。 */
+$('pDev').addEventListener('change', async ()=>{
+  const v=$('pDev').value;
+  if(v===''||v==null) return;
+  const name = ($('pDev').selectedOptions && $('pDev').selectedOptions[0])
+    ? $('pDev').selectedOptions[0].textContent.trim() : ('#'+v);
+  try{
+    const r=await api().save_settings({micDevice:+v});
+    if(r && r.ok) toast('已记住这台麦克风：'+name);
+    else toast('设备已切换，但保存失败：'+((r&&r.msg)||''));
+  }catch(e){ toast('设备已切换（保存失败，本次仍生效）'); }
+});
 
 /* ---------- 识别 + 纠音 ---------- */
 async function check(){
@@ -3235,21 +3501,84 @@ async function check(){
     if(!r.ok){ toast(r.msg||'识别失败'); return; }
     showResult(r);
   } finally { busy(false); }
-  if(!$('useLLM').checked){ $('recHint').textContent='完成。'; return; }
-  $('recHint').textContent='识别完成 ✓　AI 纠音分析中（好了会自动出现，不用等）…';
-  const diagSeq = PR.index + '|' + PR.en;      /* 句子令牌：切句后丢弃过期诊断 */
+  /* LLM 纠音不再自动执行（用户拍板 2026-10-16）：识别结果先存着，点按钮才生成 */
+  window._DIAGREQ={seq:PR.index+'|'+PR.en, en:PR.en, heard:r.heard||'',
+                   acc:r.compare.accuracy, wrong:r.compare.wrong,
+                   missed:r.compare.missed, extra:r.compare.extra};
+  $('btnDiagLLM').style.display='';
+  $('btnDiagLLM').disabled=false;
+  $('recHint').textContent='识别完成 ✓　点「🧑‍🏫 生成 LLM 纠音」出教练分析（不点不跑，省额度）。';
+}
+/* 本地发音得分（与后端 listening.score_of 同口径：准确率 - 多读扣分，钳 0-100） */
+function listeningScoreOf(acc, extra){
+  acc = Number(acc); extra = Number(extra)||0;
+  if(!isFinite(acc)) return null;
+  const pen = Math.min(15, extra*3);
+  return Math.max(0, Math.min(100, Math.round(acc - pen)));
+}
+/* LLM 纠音：用户主动点击才生成。
+   #3：点下去必须“看得见已经在跑”——按钮禁用+紫色呼吸、诊断卡立刻亮框并铺骨架，
+   成功点亮卡片并滚到结果，失败收回骨架、按钮复位可重试。 */
+function diagLLMReset(){
+  const b=$('btnDiagLLM'); if(!b) return;
+  b.disabled=false; b.classList.remove('diag-busy'); b.textContent='🧑‍🏫 生成 LLM 纠音';
+  const dc=$('diagCard'); if(dc){ dc.classList.remove('diag-running'); dc.classList.remove('diag-done'); }
+}
+function runDiagLLM(){
+  const q=window._DIAGREQ; if(!q) return toast('先录一句并识别');
+  if(q.seq !== PR.index + '|' + PR.en) return toast('已切换句子，请重新识别后再点');
+  const btn=$('btnDiagLLM');
+  if(btn.disabled) return;                        /* 已经点过了，别重复烧额度 */
+  btn.disabled=true; btn.classList.add('diag-busy'); btn.textContent='🧑‍🏫 正在纠音…';
+  const dc=$('diagCard');
+  dc.style.display=''; dc.classList.add('diag-running'); dc.classList.remove('diag-done');
+  $('diagSummary').innerHTML='<span class="diag-run-hint"><span class="spin"></span>AI 正在逐词分析这句的发音，通常几秒钟…</span>';
+  $('diagProblems').innerHTML='<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
+  $('diagLinking').innerHTML=''; $('diagTip').textContent='';
+  $('recHint').textContent='AI 纠音分析中（诊断卡已亮起，结果会自动填进去，不用等）…';
+  dc.scrollIntoView({block:'nearest', behavior:'smooth'});
   TaskFloat.add('diag','🧑‍🏫 AI 纠音','正在分析你的发音，好了会自动出现在下方诊断卡…');
-  api().practice_diag(PR.en, r.heard||'', r.compare.accuracy, r.compare.wrong,
-                      r.compare.missed, r.compare.extra)
+  api().practice_diag(q.en, q.heard, q.acc, q.wrong, q.missed, q.extra)
     .then(dr=>{
       TaskFloat.remove('diag');
-      if(diagSeq !== PR.index + '|' + PR.en) return;   /* 已切句，丢弃 */
-      if(dr.ok){ renderDiag(dr.diag); $('recHint').textContent='完成。点句子里的词可查释义并收藏。'; }
-      else $('recHint').textContent='AI 纠音不可用：'+(dr.msg||'');
+      diagLLMReset();
+      if(q.seq !== PR.index + '|' + PR.en) return;   /* 已切句，丢弃 */
+      if(dr.ok && dr.diag && !dr.diag.error){
+        renderDiag(dr.diag);
+        dc.classList.remove('diag-running'); dc.classList.add('diag-done');
+        $('btnDiagLLM').style.display='none';
+        $('recHint').textContent='纠音完成 ✓ 结果在下方诊断卡里。点句子里的词可查释义并收藏。';
+        dc.scrollIntoView({block:'nearest', behavior:'smooth'});
+        /* 发音得分：本地分先顶上（LLM 没给 score 时不再永远显示「—」） */
+        const sc = dr.diag && typeof dr.diag.score==='number' ? dr.diag.score
+                                                               : listeningScoreOf(q.acc, q.extra);
+        if(sc!=null) $('sScore').textContent = sc;
+      }
+      else if(dr.ok && dr.diag && dr.diag.error){
+        /* 后端说 ok 但 LLM 自己报错：卡里写清原因，按钮留着让用户稍后重试 */
+        renderDiag(dr.diag);
+        dc.classList.remove('diag-running');
+        $('btnDiagLLM').style.display='';
+        $('recHint').textContent='AI 纠音暂不可用：'+(dr.diag.error||'')+'（可稍后重试）';
+      }
+      else{
+        /* 失败不留半张骨架卡：收回卡片、按钮复位，用户可以直接再点一次 */
+        dc.style.display='none';
+        $('btnDiagLLM').style.display='';
+        $('recHint').textContent='AI 纠音失败：'+(dr.msg||'未知原因')+'（可再点一次重试）';
+        errToast('AI 纠音失败：'+(dr.msg||'未知原因'));
+      }
     })
-    .catch(()=>{ TaskFloat.remove('diag');
-      if(diagSeq === PR.index + '|' + PR.en) $('recHint').textContent='完成。'; });
+    .catch(()=>{
+      TaskFloat.remove('diag');
+      diagLLMReset();
+      if(q.seq !== PR.index + '|' + PR.en) return;
+      dc.style.display='none';
+      $('btnDiagLLM').style.display='';
+      $('recHint').textContent='AI 纠音请求出错（可再点一次重试）。';
+    });
 }
+$('btnDiagLLM').addEventListener('click', runDiagLLM);
 function showResult(r){
   const c=r.compare;
   $('sScore').textContent='—';
@@ -3258,7 +3587,10 @@ function showResult(r){
   $('sAcc').textContent = c.accuracy+'%';
   $('sAcc').style.color = c.accuracy>=90?'var(--ok)':c.accuracy>=70?'var(--warn)':'var(--bad)';
   const d=r.diag;
-  $('sScore').textContent = (d && typeof d.score==='number') ? d.score : '—';
+  /* 发音得分：本地分先顶上（LLM 纠音改手动后 diag 为 null，得分不再永远显示「—」）。
+     与后端 listening.score_of 同口径：准确率 - 多读×3（最多扣 15），钳 0-100。 */
+  $('sScore').textContent = (d && typeof d.score==='number') ? d.score
+                         : (listeningScoreOf(c.accuracy, c.extra) ?? '—');
   $('sCounts').innerHTML = `读错 <b style="color:var(--bad)">${c.wrong}</b>　漏读 <b>${c.missed}</b>　多读 <b style="color:var(--warn)">${c.extra}</b>　共 <b>${c.refCount}</b> 词`;
   $('heardText').textContent = r.heard || '（没听清）';
   $('cmpBox').innerHTML = c.items.map(x=>{
@@ -3334,16 +3666,6 @@ $('btnPLog').addEventListener('click', async ()=>{
   alert('运行日志（最近）：\n\n'+(r.logs||[]).map(x=>`[${x.t}] ${x.m}`).join('\n') || '（空）');
 });
 
-/* ---------- 自定义音色 ---------- */
-async function addCustomVoice(){
-  const name=prompt('音色名称（自己取，如「可露希尔」）：'); if(!name) return;
-  const instruct=prompt('风格描述（MiMo 用它控制音色，写得越具体越准）：\n例：A cheerful young female voice with a slightly mischievous, playful tone, medium-high pitch, light and quick.');
-  if(!instruct) return;
-  const r=await api().add_custom_voice(name, instruct, 'Chloe');
-  if(r.ok){ toast('已添加音色'); await loadPracticeInfo(); }
-  else toast(r.msg||'添加失败');
-}
-
 /* ---------- 单词抽屉 ---------- */
 let DRAW={ word:'', context:'' };
 async function openWordDrawer(word){
@@ -3382,9 +3704,16 @@ async function openWordDrawer(word){
 $('dClose').addEventListener('click', ()=>$('drawer').classList.remove('open'));
 async function speakWord(w){
   try{
-    /* 单词读音强制 Edge en-US 神经音色（后端兜底 MiMo），不再跟随场景引擎 */
+    /* 单词读音强制 Edge en-US 神经音色（后端失败时退到当前可用引擎），不跟随场景引擎 */
     const r=await api().speak_word(w);
-    if(r && r.ok) AudioMgr.play(new Audio(r.url));
+    if(r && r.ok){
+      AudioMgr.play(new Audio(r.url));
+      /* 真换了引擎要说出来：曾经后端恒报 via='edge'，用户听到的声音跟预期不符却无提示 */
+      if(r.via && r.via!=='edge'){
+        const _vn = r.via==='dashscope'?'阿里云 Qwen TTS':(r.via==='mimo'?'MiMo':r.via);
+        toast(`Edge 不可用，这句改用 ${_vn} 朗读`, 3000);
+      }
+    }
   }catch(e){}
 }
 $('dSpeak').addEventListener('click', ()=>speakWord(DRAW.word));
@@ -3411,6 +3740,9 @@ $('dSave').addEventListener('click', async ()=>{
 /* ================= 听力练习 ================= */
 let L = { list: [], pos: 0, ex: null, itemId: '', stats: null, mode: 'dictation', level: '',
           audioUrl: '', segStart: 0, segEnd: null };
+/* 最近一次听写判卷结果：供「🔊 正确句」「🔊 讲解」两个按钮取用。
+   此前只写不声明（LLAST 无任何 let/var），按钮一点就 ReferenceError —— 2026-10-16 修复 */
+let LLAST = null;
 
 async function ensureListen(){
   if(!L.itemId){ L.itemId = PR.itemId || (LIB[0] && LIB[0].id) || ''; }
@@ -3456,11 +3788,17 @@ async function listenPlay(slow, forceTts){
   }
   busy(true, slow ? '合成慢速音频…' : '合成音频…');
   try{
-    const pid = slow ? 'slow_teacher' : ($('lVoice').value || 'narrator');
+    /* H-03 两处修正：
+       ① 音色跟「音色」下拉一致，慢速只降播放速度，不再强制切 slow_teacher；
+       ② 合成结果必须挂到 lAudio.src —— 这里曾经漏了赋值，合成完直接 play()
+          放的是上一句残留的 src（听力页「🎙 合成」听到别的句子/别的音色）。 */
+    const pid = $('lVoice').value || 'narrator';
     const r = await api().listen_read_text(L.itemId, row.index, pid, '');
     if(!r.ok) return errToast('合成失败：' + (r.msg||''));
+    const a = $('lAudio');
+    if(a.getAttribute('src') !== r.url) a.src = r.url;
     L.segStart = 0; L.segEnd = null;
-    AudioMgr.play($('lAudio'));
+    AudioMgr.play(a, slow ? 0.75 : 1);
   } finally { busy(false); }
 }
 $('lAudio').addEventListener('timeupdate', ()=>{
@@ -3664,6 +4002,93 @@ function jumpPractice(){
 $('btnPJump').addEventListener('click', jumpPractice);
 $('pJump').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); jumpPractice(); } });
 
+/* ---- #4 句子清单弹窗（练习页 + 听力页共用）----
+   练习页：一次 api().sentence_list(itemId) 拿全部句子（100~500 句、几十 KB），
+           在本地过滤，每敲一个字都回调后端纯属浪费；点一行 loadSentence(row.index)。
+   听力页：用已加载的 L.list（已按难度过滤），跳转用列表位置 loadListenItem(pos)。 */
+const SJ = { scope:'practice', rows:[], view:[], sel:0 };
+function sjCurNo(){
+  return SJ.scope==='listen' ? (L.list[L.pos] ? L.list[L.pos].index : -1) : PR.index;
+}
+function sjFilter(){
+  const q = ($('sentJumpSearch').value||'').trim().toLowerCase();
+  SJ.view = !q ? SJ.rows.slice() : SJ.rows.filter(x=>{
+    const no = String((x.no|0)+1);
+    return no===q || no.startsWith(q) || (x.en||'').toLowerCase().includes(q);
+  });
+  SJ.sel = Math.max(0, Math.min(SJ.sel, SJ.view.length-1));
+}
+function renderSentJump(){
+  sjFilter();
+  const box=$('sentJumpList');
+  if(!SJ.view.length){
+    box.innerHTML='<div class="empty" style="padding:26px 12px">没有匹配的句子，换个关键词或清空搜索</div>';
+    return;
+  }
+  const cur = sjCurNo();
+  box.innerHTML = SJ.view.map((x,i)=>`
+    <div class="sj-row${i===SJ.sel?' on':''}${x.no===cur?' cur':''}" data-i="${i}">
+      <span class="sj-no">${x.no+1}</span>
+      <span class="sj-en">${esc(x.en||'')}</span>
+    </div>`).join('');
+  const on=box.querySelector('.sj-row.on'); if(on) on.scrollIntoView({block:'nearest'});
+}
+async function openSentJump(scope){
+  SJ.scope=scope; SJ.sel=0;
+  $('sentJumpSearch').value='';
+  const meta=$('sentJumpMeta');
+  if(scope==='listen'){
+    if(!L.list.length) return toast('先加载听力列表');
+    SJ.rows = L.list.map((x,i)=>({pos:i, no:(x.index!=null?x.index:i), en:x.text||''}));
+    meta.textContent = '共 '+SJ.rows.length+' 句（当前难度）';
+  }else{
+    if(!PR.itemId) return toast('先在「语料库」选一个语料');
+    meta.textContent='读取中…';
+    let r;
+    try{ r = await api().sentence_list(PR.itemId); }
+    catch(e){ meta.textContent=''; return errToast('读取句子清单失败'); }
+    if(!r || !r.ok){ meta.textContent=''; return toast((r&&r.msg)||'取句子失败：先给这个语料生成字幕'); }
+    SJ.rows = (r.rows||[]).map((x,i)=>({pos:i, no:(x.index!=null?x.index:i), en:x.en||''}));
+    meta.textContent = '共 '+SJ.rows.length+' 句' + (r.cueTotal && r.cueTotal!==SJ.rows.length ? ('（字幕共 '+r.cueTotal+' 条）') : '');
+  }
+  const at = SJ.rows.findIndex(x=>x.no===sjCurNo());
+  SJ.sel = at<0 ? 0 : at;
+  $('sentJumpCard').style.display='';
+  renderSentJump();
+  $('sentJumpSearch').focus();
+}
+function closeSentJump(){ $('sentJumpCard').style.display='none'; }
+function sjGo(){
+  if(!SJ.view.length) return toast('没有可跳转的句子');
+  const it = SJ.view[SJ.sel]; if(!it) return;
+  closeSentJump();
+  if(SJ.scope==='listen'){ loadListenItem(it.pos); toast('已跳到听力列表第 '+(it.pos+1)+' / '+L.list.length+' 句'); }
+  else { loadSentence(it.no); toast('已跳到第 '+(it.no+1)+' 句'); }
+}
+$('btnSentJumpClose').addEventListener('click', closeSentJump);
+$('btnSentJumpGo').addEventListener('click', sjGo);
+$('sentJumpList').addEventListener('click', e=>{
+  const row=e.target.closest('.sj-row'); if(!row) return;
+  SJ.sel = +row.dataset.i; if(isNaN(SJ.sel)) return;   /* 点哪行跳哪行 */
+  sjGo();
+});
+$('sentJumpSearch').addEventListener('input', ()=>{ SJ.sel=0; renderSentJump(); });
+$('sentJumpSearch').addEventListener('keydown', e=>{
+  if(e.key==='ArrowDown'){ e.preventDefault(); if(SJ.sel<SJ.view.length-1){ SJ.sel++; renderSentJump(); } }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); if(SJ.sel>0){ SJ.sel--; renderSentJump(); } }
+  else if(e.key==='Enter'){ e.preventDefault(); sjGo(); }
+  else if(e.key==='Escape'){ e.preventDefault(); closeSentJump(); }
+});
+/* 焦点不在搜索框时（点过某一行之后）也能用 ↑↓ / Esc：把键处理挂到整张卡上 */
+$('sentJumpCard').addEventListener('keydown', e=>{
+  if(e.key==='Escape'){ closeSentJump(); return; }
+  if(e.key==='ArrowDown'){ e.preventDefault(); if(SJ.sel<SJ.view.length-1){ SJ.sel++; renderSentJump(); } }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); if(SJ.sel>0){ SJ.sel--; renderSentJump(); } }
+  else if(e.key==='Enter' && e.target && e.target.id!=='sentJumpSearch'){ e.preventDefault(); sjGo(); }
+});
+$('btnSentList').addEventListener('click', ()=>openSentJump('practice'));
+$('btnLSentList').addEventListener('click', ()=>openSentJump('listen'));
+
 async function loadListenList(){
   const lv = $('lLevel').value;
   const r = await api().listen_sentences(L.itemId, lv, 300, 0);
@@ -3692,6 +4117,7 @@ async function loadListenItem(pos){
   if(!L.list.length) return;
   L.pos = Math.max(0, Math.min(L.list.length-1, pos));
   const row = L.list[L.pos];
+  LLAST = null;                       /* 切句即失效：正确句/讲解按钮回到「先提交一次听写」 */
   L.mode = $('lMode').value; L.level = row.level;
   const ex = await api().listen_make(L.itemId, row.index, L.mode, '', Date.now()%100000);
   if(!ex.ok){ toast(ex.msg||'出题失败'); return; }
@@ -3724,6 +4150,7 @@ function renderListenPrompt(){
 }
 
 function showListenResult(r){
+  LLAST = r;                         /* 记住本次判卷结果，供正确句/讲解按钮使用 */
   const c = r.compare||{};
   $('lResultCard').style.display = '';
   $('lScoreTxt').innerHTML = `准确率 <b style="color:${c.accuracy>=90?'var(--ok)':c.accuracy>=70?'var(--warn)':'var(--bad)'}">${c.accuracy}%</b>　得分 <b style="color:var(--purple)">${r.score}</b>　读错${c.wrong} 漏读${c.missed} 多读${c.extra}`;
@@ -3755,82 +4182,8 @@ function showListenResult(r){
 }
 
 
-/* ================= 设置：测试朗读事件 ================= */
-$('btnTestEn').addEventListener('click', ()=>testRead('en'));
-$('btnTestZh').addEventListener('click', ()=>testRead('zh'));
-$('btnTestBoth').addEventListener('click', ()=>testRead('both'));
-$('btnDesignVoice').addEventListener('click', async ()=>{
-  const name = $('dvName').value.trim(), ins = $('dvInstruct').value.trim();
-  if(!name || !ins) return toast('名称和英文描述都要填');
-  busy(true, '音色设计中…');
-  try{
-    const r = await api().tts_design_voice(name, ins);
-    if(!r.ok) return toast('设计失败：'+(r.msg||''));
-    AudioMgr.play($('testAudio'));
-    toast('设计成功，已存入「我的音色」');
-    await loadTestVoices(); await loadPracticeInfo();
-  } finally { busy(false); }
-});
-$('btnPickAudio').addEventListener('click', async ()=>{
-  const r = await api().pick_audio();
-  if(r.ok){ $('cvPath').value = r.path; previewCloneRef(r.path); }
-});
-
-// 参考音频下拉：本机已切好的直接选，不用手输路径
-async function loadCloneRefs(){
-  const r = await api().clone_refs();
-  if(!r.ok) return;
-  CLONEREFS = r.refs || [];
-  const groups = {};
-  (r.refs||[]).forEach(x=>{ (groups[x.label] = groups[x.label]||[]).push(x); });
-  let html = '<option value="">（选一段参考音频）</option>';
-  for(const g in groups){
-    html += `<optgroup label="${esc(g)}">` + groups[g].map(x=>
-      `<option value="${esc(x.path)}"${x.ok?'':' disabled'}>${esc(x.name.slice(0,26))} · ${x.dur}s`
-      + `${x.note?'  「'+esc(x.note.slice(0,18))+'」':''}${x.ok?'':'  （时长不合适）'}</option>`
-    ).join('') + `</optgroup>`;
-  }
-  $('cvRefSelect').innerHTML = html;
-  if(r.hint) $('cvHint').innerHTML = esc(r.hint)
-    + '<br>克隆后程序会把这段音频<b>复制保存</b>下来 —— 因为每次合成都需要它'
-    + '（MiMo 返回的 voiceId 不能单独用来合成，这是它的接口限制）。';
-}
-
-function previewCloneRef(p){
-  if(!p) return;
-  const r = ((CLONEREFS||[]).find(x=>x.path===p));
-  if(r && r.url){ $('cvAudio').src = r.url; }
-}
-let CLONEREFS = [];
-
-$('cvRefSelect').addEventListener('change', ()=>{
-  const p = $('cvRefSelect').value;
-  $('cvPath').value = p;
-  const r = (CLONEREFS||[]).find(x=>x.path===p);
-  if(r){
-    $('cvAudio').src = r.url;
-    $('cvHint').innerHTML = `已选：<b>${esc(r.name)}</b>　${r.dur}s　${r.sr}Hz　${r.ch}声道`
-      + `<br><span class="kv">可以先点上面的播放器试听这段参考音频，确认干净、单人、没有背景音乐。</span>`;
-  }
-});
-$('btnCloneVoice').addEventListener('click', async ()=>{
-  const name = $('cvName').value.trim(), p = $('cvPath').value.trim(), ins = $('cvInstruct').value.trim();
-  if(!name || !p) return toast('名称和参考音频都要填');
-  busy(true, '音色克隆中…');
-  try{
-    const r = await api().tts_clone_voice(name, p, ins);
-    if(!r.ok) return toast('克隆失败：'+(r.msg||''));
-    AudioMgr.play($('testAudio'));
-    toast('克隆成功，已存入「我的音色」');
-    await loadTestVoices(); await loadPracticeInfo();
-  } finally { busy(false); }
-});
-$('myVoiceList').addEventListener('click', async e=>{
-  const b = e.target.closest('[data-rmvoice]'); if(!b) return;
-  if(!confirm('移除这个音色？')) return;
-  const r = await api().remove_custom_voice(b.dataset.rmvoice);
-  if(r.ok){ toast('已移除'); await loadTestVoices(); await loadPracticeInfo(); }
-});
+/* （#9）旧「音色工作台」的测试朗读 / 文字设计 / 参考音频克隆：事件与函数已随卡片整卡删除。
+   试听改用上方「语音输出」卡的 ▶ 试听英文 / ▶ 试听中文（spPreview），音色选择用 spVoice 下拉。 */
 
 /* ================= 听力：事件绑定 ================= */
 $('lItem').addEventListener('change', async ()=>{ L.itemId=$('lItem').value; L.list=[]; await loadListenList(); gistReset(); });
@@ -3840,13 +4193,15 @@ $('btnLSayEn').addEventListener('click', async ()=>{
   const en=(r.answer||'').trim(); if(!en) return toast('没有正确句');
   busy(true,'合成正确句…');
   try{
-    const sp=await api().tts_speak(en, 'slow_teacher');
+    /* H-03：全站合成音色的口径统一——只认「音色」下拉，不再硬编码 slow_teacher。
+       答案朗读曾经固定用慢速教学音色（voice=Chloe），用户换了音色还是听另一个人。 */
+    const sp=await api().tts_speak(en, $('lVoice').value || 'narrator');
     if(sp&&sp.ok){ AudioMgr.play(new Audio(sp.url)); }
     else toast('合成失败：'+((sp&&sp.msg)||''));
   } finally{ busy(false); }
 });
 $('btnLExplain').addEventListener('click', async ()=>{
-  const r=LLAST; if(!r) return;
+  const r=LLAST; if(!r) return toast('先提交一次听写');
   const d=r.diag||{};
   const zh=(d.speech_zh || d.verdict || '').trim();
   if(!zh) return toast('没有需要讲解的错因');
@@ -3995,56 +4350,6 @@ document.addEventListener('keydown', e=>{
   if(e.ctrlKey && e.key==='ArrowLeft'){ e.preventDefault(); loadListenItem(L.pos-1); }
   if(e.ctrlKey && e.key==='ArrowRight'){ e.preventDefault(); loadListenItem(L.pos+1); }
 });
-
-/* ================= 设置：测试朗读 / 高级音色 ================= */
-let TEMP_SAMPLES = {};
-
-async function loadTestVoices(){
-  const p = await api().tts_presets();
-  TEMP_SAMPLES = p.samples || {};
-  const groups = {};
-  (p.presets||[]).forEach(x=>{ (groups[x.group||'其它'] = groups[x.group||'其它']||[]).push(x); });
-  let html = '';
-  for(const g in groups){
-    html += `<optgroup label="${esc(g)}">` +
-      groups[g].map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('') + `</optgroup>`;
-  }
-  $('testVoice').innerHTML = html;
-  // 只列真正存在 voices.json 里的自定义音色。
-  // 本地 GPT-SoVITS 的参考音频是每次扫描得到的，不归这里管，
-  // 混进来会给出「移除」按钮，而那个按钮删不动它们。
-  const mine = (p.presets||[]).filter(x=>x.custom);
-  $('myVoiceList').innerHTML = mine.length ? mine.map(x=>
-    `<li><span class="p">${esc(x.name)} <span class="kv">${esc(x.kind||'')}</span></span>
-     <button class="btn ghost" data-rmvoice="${esc(x.id)}">移除</button></li>`).join('')
-    : '<li><span class="p">（还没有自定义音色）</span></li>';
-}
-
-async function testRead(lang){
-  const pid = $('testVoice').value;
-  if(!pid) return toast('先选一个音色');
-  busy(true, lang==='both' ? '中英各读一遍…' : (lang==='zh'?'合成中文…':'合成英文…'));
-  try{
-    if(lang === 'both'){
-      const a = await api().speech_preview(pid, 'en', '', 1.0, false);
-      const b = await api().speech_preview(pid, 'zh', '', 1.0, false);
-      if(!a.ok) return toast('英文失败：'+(a.msg||''));
-      if(!b.ok) return toast('中文失败：'+(b.msg||''));
-      const audio = $('testAudio');
-      audio.onended = ()=>{ audio.src = b.url; AudioMgr.play(audio); audio.onended = null; };
-      audio.src = a.url; AudioMgr.play(audio);
-      $('testReadHint').innerHTML = '英文：' + esc(a.text||'').slice(0,70) + '…<br>中文：' + esc(b.text||'').slice(0,50) + '…（英文播完自动接中文）';
-    } else {
-      const r = await api().speech_preview(pid, lang, '', 1.0, false);
-      if(!r.ok) return errToast('合成失败：'+(r.msg||''));
-      if(!r.url) return toast('合成返回了但没有音频地址（检查该音色/模型是否可用）');
-      const audio = $('testAudio');
-      audio.onended = null;
-      audio.src = r.url; AudioMgr.play(audio);
-      $('testReadHint').textContent = (lang==='zh'?'中文样本：':'英文样本：') + (r.text||'');
-    }
-  } finally { busy(false); }
-}
 
 /* ================= 设置：LLM 模型管理 ================= */
 // 静默保存（不弹提示），给"拉模型/测速"这类需要最新 key 的操作先用一下
@@ -4200,7 +4505,9 @@ $('btnAudioSave').addEventListener('click', async ()=>{
   const r=await api().save_settings({audioModel:$('audioModel').value.trim()});
   r.ok?toast('音频处理模型已保存'+(r.saved?'':'（空=跟随识别模型）')):toast(r.msg||'保存失败');
 });
-/* 当前生效的识别引擎标签（发音练习结果卡显示——改了设置立刻能看到换了没） */
+/* 当前生效的识别引擎标签（发音练习结果卡显示——改了设置立刻能看到换了没）。
+   数据源：practice_info 回传的真值（loadPracticeInfo 写入 window._ASRM），
+   设置页即点即存时也会同步刷新；没配模型时留空，不显示默认值冒充。 */
 function refreshAsrTag(){
   const el=$('asrEngTag'); if(!el) return;
   const m=(window._ASRM&&window._ASRM.model)||'';
@@ -4223,7 +4530,7 @@ $('asrProvider').addEventListener('change', async ()=>{
   refreshAsrTag();
   const h=$('asrProviderHint');
   if(h) h.innerHTML = ($('asrProvider').value==='mimo')
-    ? '当前用 MiMo 识别：更快更省，但**不返回逐词时间戳**——发音练习的逐词纠错会退化成整句比对。'
+    ? '⛔ MiMo ASR（V2.5）已于 2026-10-21 下线，当前选择不可用——请切回阿里云 paraformer-realtime-v2。'
     : '当前用阿里云识别：返回**逐词时间戳**，发音练习能精确定位到哪个词读错。';
 });
 $('btnAsrSave').addEventListener('click', async ()=>{
@@ -4328,7 +4635,7 @@ async function initProvCenter(){
     /* 卡片=引擎：同步引擎层（ttsProvider/ttsEngine/场景全跟走），刷新下方引擎格与密钥区 */
     try{
       const r=await api().speech_set_engine(pid,'');
-      if(r.ok){ toast('语音引擎已切到 '+pid); await loadSpeechHub(); }
+      if(r.ok){ toast('语音引擎已切到 '+pid); if(r.warn) toast(r.warn, 6000); await loadSpeechHub(); }
     }catch(e){}
     updateActiveCard('tts','ttsProvCards');
   });
@@ -4489,12 +4796,13 @@ async function loadSpeechHub(){
   // 当前引擎的 Key/模型绑定（speechHub 与供应商中心合一后，密钥就在这一处填）
   const cur2=(r.engines||[]).find(e=>e.id===r.engine)||{};
   const fld=$('spCredFld'); if(!fld) return;
-  window._TTS_ENG_MODELS=Object.fromEntries((r.engines||[]).filter(e=>e.id!=='mimo'&&e.model).map(e=>[e.id,e.model]));
+  window._TTS_ENG_MODELS=Object.fromEntries((r.engines||[]).filter(e=>e.id!=='mimo'&&e.modelSaved&&e.model).map(e=>[e.id,e.model]));
   if(r.engine==='edge'){ fld.style.display='none'; }         // Edge 无需 key
   else{
     fld.style.display='';
     $('spCredHint').textContent=cur2.keyName?('（存为 '+cur2.keyName+'）'):'';
     $('spCredNote').textContent=cur2.hasKey?'✓ 已保存 Key（输入框留空=不改）':'还没填 Key——该引擎现在不可用';
+    if(cur2.retired) $('spCredNote').textContent = '⛔ '+(cur2.retiredNote||'该模型已下线，请换引擎或手填新模型名');
     $('spEngKey').value=''; $('spEngKey').placeholder=cur2.hasKey?'已保存（留空不改）':'sk-…';
     $('spEngModel').value=cur2.model||'';
     /* 模型下拉预置：该引擎注册表自带的模型系列 */
@@ -4503,14 +4811,21 @@ async function loadSpeechHub(){
     renderSpModelChips(cur2.builtin||[], r.engine);
     $('spEngModel').placeholder=(cur2.builtin&&cur2.builtin.length)
       ?('下拉选，默认 '+cur2.builtin[0]):'模型名（点 ⟳ 拉取）';
+    /* #8 目录收敛只在后端做（前端不重复过滤）：这里只负责把“存着的名字已经不在最新目录里”
+       显式标出来，避免界面上悄悄留着旧别名、用户以为还能用。 */
+    const blist=cur2.builtin||[];
+    if(blist.length && cur2.model && blist.indexOf(cur2.model)<0){
+      $('spEngModel').title='当前保存的模型名不在后端最新目录里（可能是旧别名），建议从下面清单里重选一个并保存';
+      $('spCredNote').textContent += ' · ⚠ 当前模型「'+cur2.model+'」不在最新目录里（旧别名？），从清单重选后点保存';
+    }
     /* 音色下拉：按当前模型所属系列只列该系音色（跨系=Engine411） */
     const mdl=(cur2.model||'').toLowerCase();
     const fam=mdl.includes('minimax')?'minimax':(mdl.includes('qwen-audio')||mdl.includes('cosyvoice'))?'qwen-audio':'qwen3';
     const vdl=$('spEngVoiceList');
     if(vdl) vdl.innerHTML=((cur2.voices&&cur2.voices[fam])||[]).map(v=>'<option value="'+esc(v)+'">').join('');
-    $('spEngVoice').value=(r.engine==='dashscope'||r.engine==='volc')?(window._HUB_VOICE||''):'';
+    $('spEngVoice').value=(r.engine==='dashscope'||r.engine==='volc')?(r.dashscopeVoice||window._HUB_VOICE||''):'';
     const baseInp=$('spBaseUrl');
-    if(baseInp) baseInp.value=(window._HUB_BASE||'');
+    if(baseInp) baseInp.value=(r.dashscopeBaseUrl||window._HUB_BASE||'');
     /* 自动拉取（用户拍板）：换引擎/开设置自动拉一次模型清单，免去每家平台手填模型名 */
     if(cur2.canPull && !(window._PROVPULLED||{})[r.engine]){
       (window._PROVPULLED=window._PROVPULLED||{})[r.engine]=true;
@@ -4564,7 +4879,7 @@ $('btnSpPullModels').addEventListener('click', async ()=>{
   } finally{ busy(false); }
 });
 /* 保存当前引擎 Key/模型：mimo 走隐藏旧字段(随大保存)；dashscope 写 dashKey；
-   其它引擎直接 save_settings 到对应 keyName；模型进 ttsEngineModels(mimo 除外) */
+   其它引擎直接 save_settings 到对应 keyName；模型进 ttsEngineModels 字段（mimo 除外） */
 $('btnSpCredSave').addEventListener('click', async ()=>{
   if(!SP||!SP.engine) return;
   const eid=SP.engine, eng=(SP.engines||[]).find(e=>e.id===eid)||{};
@@ -4574,7 +4889,7 @@ $('btnSpCredSave').addEventListener('click', async ()=>{
     if(key) $('mimoKey').value=key;
     $('mimoModel').value=model;
     /* mimo 走隐藏旧字段——必须经 saveSetQuiet 真正落盘；
-       曾误调 save_settings({}) 空补丁 → Key 没保存 → 音色工作台合成全失败 */
+       曾误调 save_settings 传空补丁 → Key 没保存 → 语音输出卡合成全失败 */
     await saveSetQuiet();
   }else if(eid==='dashscope'){
     if(key) $('dashKey').value=key;
@@ -4582,7 +4897,10 @@ $('btnSpCredSave').addEventListener('click', async ()=>{
   }else if(eng.keyName){
     if(key) patch[eng.keyName]=key;
   }
-  if(eid!=='mimo' && eid!=='dashscope'){
+  /* 模型必须对每个非 mimo 引擎都落盘：以前把 dashscope 排除在外，于是
+     「选了阿里云模型 → 保存 → 又变回默认」，用户以为设置没生效（#6/#8）。
+     mimo 的模型走上面的隐藏字段，其余引擎统一进 ttsEngineModels。 */
+  if(eid!=='mimo'){
     patch['ttsProvider']=eid;              /* 直连 TTS 层的调用（tts_speak 等）跟着引擎走 */
     const models=Object.assign({}, (window._TTS_ENG_MODELS||{}));
     if(model) models[eid]=model; else delete models[eid];
@@ -4618,7 +4936,6 @@ $('spEngines').addEventListener('click', async e=>{
     if(!r.ok) return toast('切换失败：'+(r.msg||''));
     toast('已切到 ' + id);
     await loadSpeechHub();
-    await loadTestVoices();
     await loadPracticeInfo();
   } finally { busy(false); }
 });
@@ -4628,6 +4945,7 @@ $('spScenes').addEventListener('change', async e=>{
   const r = await api().speech_set_engine(sel.value, sel.dataset.scene);
   if(!r.ok) return toast('设置失败：'+(r.msg||''));
   toast(sel.dataset.scene + ' → ' + (sel.value || '跟随全局'));
+  if(r.warn) toast(r.warn, 6000);
 });
 
 $('btnSpSaveTest').addEventListener('click', async ()=>{
@@ -4681,7 +4999,7 @@ function renderRecList(){
       <span class="dd">${esc((x.at||'').slice(5,16))}</span>
       <span class="tx">${esc(x.en||'')}</span>
       <span class="sc" style="color:${(x.accuracy||0)>=90?'var(--ok)':(x.accuracy||0)>=70?'var(--warn)':'var(--bad)'}">${x.accuracy}%</span>
-      <span class="sc" style="color:var(--purple)">${x.score==null?'—':x.score}</span>
+      <span class="sc" style="color:var(--purple)">${x.score==null?(x.accuracy==null?'—':listeningScoreOf(x.accuracy, x.extra||0)):x.score}</span>
     </div>`).join('') : lxEmpty('还没有练习记录——去「发音练习」读一句吧');
 }
 $('btnRefreshRec').addEventListener('click', loadHome);
@@ -4878,15 +5196,20 @@ $('plAudio').addEventListener('timeupdate', ()=>{
   if(!PL.cues.length) return;
   const t=$('plAudio').currentTime;
   if(PL.loop && PL.idx>=0){ const c=PL.cues[PL.idx]; if(t>c.end+(PL.off||0)+0.05){ $('plAudio').currentTime=Math.max(0,c.start+(PL.off||0)); $('plAudio').play(); } return; }
-  let i=PL.cues.findIndex(c=>t>=c.start&&t<c.end);
-  if(i<0){ i=-1; for(let j=0;j<PL.cues.length;j++){ if(PL.cues[j].start<=t) i=j; else break; } }
+  /* 播放位置 t 已隐含校准偏移（跳转时加了 PL.off），判定必须给 cue 加同样的偏移再比，
+     否则校准过的语料上自动高亮会整体错位 PL.off 毫秒（点了第N句却高亮第N-1句） */
+  const _o=PL.off||0;
+  let i=PL.cues.findIndex(c=>t>=c.start+_o&&t<c.end+_o);
+  if(i<0){ i=-1; for(let j=0;j<PL.cues.length;j++){ if(PL.cues[j].start+_o<=t) i=j; else break; } }
   if(i>=0&&i!==PL.idx) markPl(i,true);
 });
 $('plPrev').addEventListener('click',()=>seekPl(PL.idx-1));
 $('plNext').addEventListener('click',()=>seekPl(PL.idx+1));
 $('plReplay').addEventListener('click',()=>{ if(PL.idx>=0){ $('plAudio').currentTime=Math.max(0,PL.cues[PL.idx].start+(PL.off||0)); $('plAudio').play(); }});
 function seekPl(i){ if(!PL.cues.length) return; i=Math.max(0,Math.min(PL.cues.length-1,i));
-  $('plAudio').currentTime=PL.cues[i].start; markPl(i,true); $('plAudio').play(); }
+  /* 与点击跳转(:4939)/重播(:4951)/单句循环(:4944)一致：必须叠加语料校准偏移 PL.off，
+     否则「上一句/下一句」在校准过的语料上整体差 PL.off 毫秒（音频与句子时间戳不一致） */
+  $('plAudio').currentTime=Math.max(0,PL.cues[i].start+(PL.off||0)); markPl(i,true); $('plAudio').play(); }
 $('plLoop').addEventListener('click',()=>{ PL.loop=!PL.loop; $('plLoop').classList.toggle('on',PL.loop);
   toast(PL.loop?'单句循环：开':'单句循环：关'); });
 $('plRate').addEventListener('change',()=>{ $('plAudio').playbackRate=parseFloat($('plRate').value)||1; });
@@ -5433,7 +5756,10 @@ $('favChip').addEventListener('click', async e=>{
   const ctx=chip.dataset.ctx||'practice';
   const en=chip.dataset.en||'', zh=chip.dataset.zh||'';
   const itemId=chip.dataset.item||'', idx=parseInt(chip.dataset.idx||'-1');
-  CHIP_CLOSING=true;
+  /* 这里原来还有一行 CHIP_CLOSING=true;（全文件只写不读、也没声明）——
+     严格模式下直接抛 ReferenceError，把后面的 收藏/加词/连读 全打断。
+     真正的“正在关闭”标记是 chip.dataset.closing（见 mousedown 与 mouseup 宽限检查），
+     所以死变量整行删除即可，下面的关闭与动作分支不受影响。 */
   chip.style.display='none'; chip.dataset.hold='';
   if(!txt) return;
   if(act==='fav'){
@@ -5576,7 +5902,7 @@ async function loadSentFavs(){
       tagset.map(t=>'<button class="btn ghost sm'+(SENT_TAG===t?' on':'')+'" data-senttag="'+esc(t)+'">'+esc(t)+' '+
         kinded.filter(x=>(x.tags||[]).includes(t)).length+'</button>').join('')+'</div>':'')+
     (items.length
-    ? '<div class="card">'+ items.map(f=>{
+    ? '<div class="card sentfav-card">'+ items.map(f=>{
       if((f.kind||'sentence')==='grammar'){
         const g=f.gs||{};
         return '<div class="rec-item" data-zh="'+esc(f.zh||'')+'" data-item="'+esc(f.itemId||'')+'" data-idx="'+(f.index!=null?f.index:-1)+'">'+
@@ -6280,7 +6606,7 @@ $('btnScReset').addEventListener('click', async ()=>{
 const API_SITES=[
   {name:'阿里云百炼（推荐·全家桶）', url:'https://bailian.console.aliyun.com/?apiKey=1#/api-key', desc:'需自行注册获取 API Key；识别/转写/LLM/TTS 共用一个 Key', key:'语音识别卡里填「阿里云 API Key」'},
   {name:'硅基流动 SiliconFlow', url:'https://cloud.siliconflow.cn/account/ak', desc:'LLM 备选；在「对话与纠错」填 OpenAI 兼容地址', key:'设置 → 对话与纠错'},
-  {name:'小米 MiMo（可选）', url:'https://xiaomimimo.com/', desc:'TTS/ASR 备选，可自行配置', key:'设置 → 语音输出/语音识别'},
+  {name:'小米 MiMo（V2.5 已下线）', url:'https://xiaomimimo.com/', desc:'V2.5 TTS/ASR 已于 2026-10-21 下线，如厂商发布 v2.6 可手填模型名继续用', key:'设置 → 语音输出/语音识别'},
 ];
 const MODEL_GUIDE=[
   ['🎤 语音识别','paraformer-realtime-v2','练跟读时"听你说的每个词"——全模型唯一带逐词时间戳，纠音/对齐离不开，别换'],
@@ -6288,7 +6614,7 @@ const MODEL_GUIDE=[
   ['⏱ 时间轴定稿','paraformer（固定）','"每句话在第几秒"的校准工——词级时间戳专用，系统自动调用'],
   ['🔍 转写质检','qwen3.8-omni-flash（固定）','下载完"抽听三段防漏转"的质检员——自动跑'],
   ['💬 对话纠错','qwen-plus（推荐）','释义/纠音讲解/翻译/总结的大脑——设置→对话与纠错'],
-  ['🔊 语音合成','按音色选','示范朗读的嗓子——音色工作台可试听'],
+  ['🔊 语音合成','按音色选','示范朗读的嗓子——设置→语音输出卡里选音色并按 ▶ 试听'],
 ];
 async function loadHelp(){
   $('apiSites').innerHTML = API_SITES.map((s,i)=>`
@@ -6484,7 +6810,15 @@ function renderDashboard(d, rs){
   const kvs=$('dataKpi').querySelectorAll('.v');
   countUp(kvs[0], k.total, ''); countUp(kvs[1], k.streak, ' 🔥');
   countUp(kvs[2], k.days14, ''); countUp(kvs[3], Math.round(k.avgAccuracy), '%');
+  /* 历史记录里 score 为空的旧条目：用准确率按同口径补一个本地分显示（不写回文件，
+     只为让「平均发音得分」不再恒显 0 / 「—」） */
   if(rs && rs.avgScore!=null && rs.avgScore!==''){ countUp(kvs[4], Math.round(rs.avgScore), ''); }
+  else if(rs && (rs.last10||[]).some(x=>x.accuracy!=null)){
+    const arr=(rs.last10||[]).filter(x=>x.accuracy!=null)
+      .map(x=>listeningScoreOf(x.accuracy, x.extra||0)).filter(v=>v!=null);
+    if(arr.length) countUp(kvs[4], Math.round(arr.reduce((a,b)=>a+b,0)/arr.length), '');
+    else kvs[4].textContent='—';
+  }
   else kvs[4].textContent='—';
   function countUp(el, target, suffix){
     const t0=performance.now(), dur=800;
@@ -6615,30 +6949,46 @@ async function loadSet(){
   if(!$('dlUrl').value.trim()) $('dlUrl').value=c.lastUrl||'';
   $('extraDir').value='';
   renderDirs(c.extraDirs||[]);
-  $('ttsProvider').value=c.ttsProvider||'mimo';
+  $('ttsProvider').value=c.ttsProvider||'dashscope';
   /* 多供应商：切换时预填 baseUrl（speech_providers.py 注册表在前端留了提示）*/
   $('mimoKey').value=c.mimoApiKey||''; $('mimoBase').value=c.mimoBaseUrl||'';
   $('mimoModel').value=c.mimoTtsModel||''; $('mimoVoice').value=c.mimoVoice||'';
   $('dashKey').value=c.dashscopeApiKey||''; $('asrModel').value=c.asrModel||'';
   window._ASRM={provider:c.asrProvider||'dashscope', model:c.asrModel||''};
+  refreshAsrTag();
   window._HUB_VOICE=c.dashscopeVoice||''; window._HUB_BASE=c.dashscopeBaseUrl||'';
   $('asrProvider').value=c.asrProvider||'dashscope';
   $('asrMode').value=c.asrMode||'traditional';
+  /* #6：存量值不在固定选项里时不再静默回落 qwen3-asr-flash（那会让下一次保存把它写回去，
+     表现就是“改了音频识别模型改不动”）——补一个保留项，原样显示后端真值。 */
   { const am=$('audioModel'); const v=c.audioModel||'qwen3-asr-flash';
-    if([...am.options].some(o=>o.value===v)){ am.value=v; } else { am.value='qwen3-asr-flash'; } }
+    if([...am.options].some(o=>o.value===v)){ am.value=v; }
+    else {
+      const op=document.createElement('option');
+      op.value=v; op.textContent=v+' · 当前保存值（目录里没有这个选项）';
+      am.appendChild(op); am.value=v;
+    } }
   $('smartDownload').checked = c.smartDownload!==false;
   $('asrAlign').checked = (c.asrAlign!==false);
   applyAsrModeSeg(c.asrMode||'traditional');
   $('asrProviderHint').innerHTML = (c.asrProvider==='mimo')
-    ? '当前用 MiMo 识别：更快更省，但**不返回逐词时间戳** —— 发音练习的逐词纠错会退化成整句比对。'
+    ? '⛔ MiMo ASR（V2.5）已于 2026-10-21 下线，当前选择不可用——请切回阿里云 paraformer-realtime-v2。'
     : '当前用阿里云识别：返回**逐词时间戳**，发音练习能精确定位到哪个词读错。';
   $('llmBase').value=c.llmBaseUrl||''; $('llmKey').value=c.llmApiKey||''; $('llmModel').value=c.llmModel||'';
   $('defineCompact').checked = (c.defineCompact !== false);
   $('envInfo').innerHTML = r.ffmpeg
     ? `✅ ffmpeg 已就绪　·　程序目录 <span class="mono">${esc(r.appDir)}</span>`
     : '❌ 未找到 ffmpeg，无法下载。装：<code>winget install Gyan.FFmpeg</code>';
-  await loadTestVoices();
-  await loadCloneRefs();
+  /* 构建戳：用户自查“我跑的是不是旧包”的唯一凭据（这次多条反馈就是旧构建造成的） */
+  { const bi=$('buildInfo');
+    if(bi){
+      const stamp = c.buildStamp || r.buildStamp || '';
+      const at = c.buildAt || r.buildAt || '';
+      bi.innerHTML = stamp
+        ? `构建：<span class="mono">${esc(stamp)}</span>${at?('　·　'+esc(at)):''}`
+          + '<span class="kv">（和 exe 更新包对不上就是还在跑旧版，重新替换 dist 里的 _internal/ui/index.html）</span>'
+        : '<span class="kv">构建信息未回传（旧后端）——这个包可能不是最新的</span>';
+    } }
   await loadSpeechHub();
   await loadTokenInfo();
   loadTtsCacheInfo();
@@ -6799,5 +7149,193 @@ if(window.pywebview && window.pywebview.api) boot();
   s.addEventListener('click', ()=>{ clearTimeout(t); dismiss(); });
 })();
 </script>
+<style id="polish">
+/* ============================================================
+   POLISH — UI 质感增量块（Kimi3 方案 · 深色主题适配版）
+   来源：buddy/kimi-k3-1 给出的 P0/P1/P2 方案。
+   适配：原方案按「浅色白底」假设书写，本应用为深色主题 + 9 套换肤
+   （forest/galaxy/golden/frost/tech/endsfield/luoxinyue/guofeng/ocean），
+   因此全部颜色改走既有主题 token（--fg/--bg/--card/--line/--acc），
+   阴影用 --fg 低透明度混合，深/浅主题下均成立。
+   回滚 = 删除整个 <style id="polish"> 块。
+   ============================================================ */
+:root{
+  /* 派生 token：跟随当前主题，不写死任何颜色 */
+  --p-acc:var(--acc);
+  --p-line:color-mix(in srgb,var(--fg) 9%,transparent);
+  --p-line-2:color-mix(in srgb,var(--fg) 16%,transparent);
+  --p-txt-1:var(--fg);
+  --p-txt-2:var(--mut);
+  --p-txt-3:color-mix(in srgb,var(--mut) 70%,var(--bg));
+  --p-sh-1:0 1px 2px color-mix(in srgb,var(--fg) 7%,transparent);
+  --p-sh-2:0 2px 6px color-mix(in srgb,var(--fg) 9%,transparent),
+           0 8px 24px -8px color-mix(in srgb,var(--fg) 15%,transparent);
+  --p-sh-3:0 12px 32px -12px color-mix(in srgb,var(--fg) 22%,transparent);
+  --p-ease:cubic-bezier(.22,.61,.36,1);
+  --p-r-s:8px; --p-r-m:12px; --p-r-l:16px;
+  --p-hi:inset 0 1px 0 color-mix(in srgb,#fff 5%,transparent);
+}
+
+/* ---------- P0-1 排版层级：标题更紧、辅助文本更灰更松 ---------- */
+h1,h2,h3{ letter-spacing:.2px; }
+.card h3{ letter-spacing:.4px; }
+.hint{ line-height:1.75; }
+.kv{ line-height:1.6; }
+/* 三级文字层级用既有语义类收口，不新增 class */
+.empty b,.card h3{ color:var(--p-txt-1); }
+
+/* ---------- P0-2 卡片 elevation：hairline + 双层软阴影 ---------- */
+.card,.item,.vitem,.kpi .k,.engcard,.prob,.libtool,.moremenu .menu{
+  box-shadow:var(--p-hi),var(--p-sh-1);
+}
+/* hover 抬升：跟随既有动效档位约定 */
+@media (prefers-reduced-motion: no-preference){
+  html:not([data-motion="light"]) .card:hover,
+  html:not([data-motion="light"]) .vitem:hover{
+    transform:translateY(-1px);
+    box-shadow:var(--p-hi),var(--p-sh-2);
+    border-color:var(--p-line-2);
+  }
+}
+.card,.vitem,.kpi .k,.engcard{
+  transition:box-shadow .18s var(--p-ease),transform .18s var(--p-ease),border-color .18s,background-color .15s;
+}
+/* 层级浮层用更强阴影 */
+#sumDrawer,#parseCard.pop,#taskFloat,.moremenu .menu,#toast{
+  box-shadow:var(--p-sh-3);
+}
+/* hero / 聚光 / AI 卡保持渐变底，只把外阴影换成软影 */
+.card.hero{ box-shadow:var(--p-hi),var(--p-sh-2); }
+#viewPractice.pv-b #resultWrap .card{ box-shadow:0 24px 80px -20px color-mix(in srgb,var(--fg) 30%,transparent),
+  0 0 60px color-mix(in srgb,var(--acc) 12%,transparent); }
+
+/* ---------- P0-3 边框克制：分隔线统一 hairline ---------- */
+.rec-item,.dlist li,.refpick{ border-color:var(--p-line); }
+.item .meta2,.sentence .zh,.moremenu .menu hr,.bar .grp + .grp{ border-color:var(--p-line); }
+.nsep{ background:var(--p-line); }
+/* 卡片内部分组线：能不用线就不用 */
+.card h3{ padding-bottom:2px; }
+
+/* ---------- P0-4 表单控件与按钮：统一 focus 光晕 + 按压反馈 ---------- */
+input[type=search],input[type=text],input[type=password],input[type=number],
+select,textarea,.scap .cap{
+  transition:border-color .15s,box-shadow .15s,background-color .15s;
+}
+input:focus,select:focus,textarea:focus,.scap .cap:focus{
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent);
+}
+/* 原生控件（audio / checkbox / radio / range）跟随强调色 */
+audio,input[type=checkbox],input[type=radio],input[type=range]{
+  accent-color:var(--p-acc);
+}
+audio{ color-scheme:dark; height:38px; vertical-align:middle; }
+audio:focus-visible{ outline:none; box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent); border-radius:var(--p-r-s); }
+/* 按钮物理反馈：只在非轻动效档位 */
+@media (prefers-reduced-motion: no-preference){
+  html:not([data-motion="light"]) .btn:active:not(:disabled),
+  html:not([data-motion="light"]) .setnav .chip:active,
+  html:not([data-motion="light"]) .seg-ctrl button:active{ transform:scale(.97); }
+}
+.btn,.setnav .chip,.seg-ctrl button,.ntab{
+  transition:background-color .15s,border-color .15s,color .15s,box-shadow .15s,transform .12s var(--p-ease);
+}
+
+/* ---------- P0-5 节奏归一（只收内部间距，不动外壳布局） ---------- */
+/* 原方案的容器 padding / 宽屏限宽会影响 .bar 与 sticky 工具条，本应用为固定高度外壳，
+   故改为只统一卡片内部节奏与间距刻度，视觉收益同等、零布局风险。 */
+.card{ padding:14px 16px; }
+.card h3{ margin:0 0 10px; }
+.fld{ margin-bottom:16px; }
+.kpi{ gap:10px; }
+.rec-item{ padding:7px 6px; margin:0 -6px; border-radius:8px; }
+.rec-item:last-child{ border-bottom:none; }
+.rec-item:hover{ background:var(--hover-bg,transparent); }
+/* 字幕修正卡选中态：accent 底色 + 左侧竖条（需求⑩，原来和 hover 分不清） */
+.rec-item.fxsel{
+  background:color-mix(in srgb,var(--acc) 16%,transparent);
+  border-left:3px solid var(--acc);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--acc) 35%,transparent);
+}
+/* 句子收藏卡：玻璃质感 + 行间距收紧（需求⑦：原来各行隔离太开、无玻璃质感） */
+.sentfav-card{
+  background:color-mix(in srgb,var(--card) 72%,transparent);
+  backdrop-filter:blur(14px) saturate(1.25);
+  -webkit-backdrop-filter:blur(14px) saturate(1.25);
+  border:1px solid color-mix(in srgb,var(--line2) 70%,transparent);
+  border-radius:var(--p-r-l,14px);
+  box-shadow:var(--p-sh-1,0 2px 10px rgba(0,0,0,.18));
+}
+.sentfav-card .rec-item{
+  padding:9px 8px; margin:0 -8px; border-radius:10px;
+  border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent);
+  transition:background-color .15s,border-color .15s;
+}
+.sentfav-card .rec-item:last-child{ border-bottom:none; }
+.sentfav-card .rec-item:hover{
+  background:color-mix(in srgb,var(--acc) 9%,transparent);
+  border-radius:10px;
+}
+
+/* ---------- P1-1 播放视图：阅读宽度 + 控制台感 ---------- */
+#viewPlay main{ max-width:840px; width:100%; margin:0 auto; }
+#viewPlay .card{ box-shadow:var(--p-hi),var(--p-sh-2); }
+/* 逐句卡：hover 有底色、当前句靠左 accent 竖线（markPl 写内联 border-color，
+   用属性选择器兜底命中当前句，不改 JS） */
+#plCues .cue{ border-radius:var(--p-r-m); }
+#plCues .cue:hover{ background:var(--hover-bg,transparent); }
+#plCues .cue[style*="border-color"]{ border-left:3px solid var(--acc) !important;
+  padding-left:11px; background:color-mix(in srgb,var(--acc) 6%,transparent); }
+
+/* ---------- P1-2 徽章统一：pill 体系（颜色由各语义色派生） ---------- */
+.pill,.svc .s,.prob .ty,.seg .btn.on{
+  font-weight:600; letter-spacing:.2px; line-height:1.5;
+  border-color:var(--p-line-2);
+}
+.pill{ padding:2px 9px; }
+.tag{ border-color:var(--p-line); }
+/* 难度徽章保持四色语义，只统一形状与描边 */
+.lvl,.topic{ letter-spacing:.2px; }
+.svc .s{ padding:3px 10px; }
+
+/* ---------- P1-3 图表密度与可交互性 ---------- */
+/* 说明：#heatGrid/#trendChart 的格子圆角/间距由 JS 内联 style 写入，
+   内联优先级高于样式表，无法用 CSS 覆盖；这里补交互反馈。 */
+#trendChart .bar-a{ transition:filter .12s,transform .12s; transform-origin:bottom; }
+#trendChart .bar-a:hover{ filter:brightness(1.25); }
+#heatGrid .cell-a{ transition:filter .12s,transform .12s; }
+#heatGrid .cell-a:hover{ filter:brightness(1.2); transform:scale(1.12); }
+/* mixBars 粗细与内边距 */
+#mixBars .kv{ margin-top:9px; }
+
+/* ---------- P1-4 视图切换入场（只加动画，不改 go() 逻辑） ---------- */
+@media (prefers-reduced-motion: no-preference){
+  html:not([data-motion="light"]) .view:not(.hide){ animation:pViewIn .22s var(--p-ease) backwards; }
+}
+@keyframes pViewIn{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
+@media (prefers-reduced-motion: reduce){ .view{ animation:none !important; } }
+
+/* ---------- P1-5 滚动条细化：10px 胶囊 ---------- */
+::-webkit-scrollbar{ width:10px; height:10px; }
+::-webkit-scrollbar-corner{ background:transparent; }
+::-webkit-scrollbar-thumb{ border:3px solid transparent; background-clip:padding-box; border-radius:8px; }
+::-webkit-scrollbar-thumb:hover{ border-width:2px; }
+
+/* ---------- P2 可选：空态 / hero 容器 ---------- */
+.empty{ color:var(--p-txt-3); }
+.empty::before{ opacity:.85; }
+.empty .btn{ margin-top:16px; }
+/* hero 边缘：内描边让插画与容器过渡不生硬 */
+.lx-hero{ box-shadow:var(--p-hi),0 4px 18px color-mix(in srgb,var(--acc) 14%,transparent); }
+.lx-hero .lx-hero-art{ -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 46%);
+        mask-image:linear-gradient(90deg,transparent 0,#000 46%); }
+.lx-chip{ box-shadow:var(--p-hi); }
+/* 数据学习中心主页卡片间距刻度 */
+.lx-grid{ gap:12px; }
+.lx-page .card{ box-shadow:var(--p-hi),var(--p-sh-1); }
+
+/* ---------- 全局收尾：链接下划线偏移 + 选中色 ---------- */
+a{ text-underline-offset:3px; }
+a:hover{ color:var(--acc-hover,var(--acc)); }
+</style>
 </body>
 </html>

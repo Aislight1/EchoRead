@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 听与读 · 核心逻辑
@@ -273,11 +273,15 @@ def pick_langs(cues):
 
 def fmt_ts(sec, srt=True):
     total = max(0.0, float(sec))
-    h, rem = divmod(int(total), 3600)
+    # 先整体四舍五入到毫秒再拆分。旧写法 `int((total-int(total))*1000+0.5)` 在
+    # total=5.9996 这类值上会得到 ms=1000，写出非法 SRT "00:00:05,1000"
+    # （毫秒字段必须 000-999，且秒未进位）——解析器会读错或直接拒收。
+    total_ms = int(total * 1000 + 0.5)            # 四舍五入到毫秒（消除浮点↔3位毫秒往返漂移）
+    h, rem = divmod(total_ms // 1000, 3600)
     m, s = divmod(rem, 60)
+    ms = total_ms % 1000
     if not srt:
         return f'{h:02d}:{m:02d}:{s:02d}' if h else f'{m:02d}:{s:02d}'
-    ms = int((total - int(total)) * 1000 + 0.5)   # 四舍五入：减少 vtt 浮点↔srt 3位毫秒的往返漂移
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
 
 
@@ -683,6 +687,17 @@ def scan_library(dirs):
             if not dur and FFMPEG:
                 dur = probe_duration(audio)
 
+            # ⑤ 来源类型：演讲/对话/读书/播客 的后处理参数不同，列表页要能显示出来。
+            # meta 里没有就现猜一次（只读，不回写——回写发生在下载与手动改类时）
+            try:
+                import videokind as _vk
+                _kind = meta.get('sourceKind')
+                if _kind not in _vk.RULES:
+                    _kind = _vk.classify(title, meta.get('url') or '', meta)
+                _kind_label = _vk.label(_kind)
+            except Exception:
+                _kind, _kind_label = 'other', '未分类'
+
             # 确保有 vtt（播放器要用）
             for lg in ('en', 'zh'):
                 srt = None
@@ -710,6 +725,8 @@ def scan_library(dirs):
                 'zhCues': meta.get('zhCues') or 0,
                 'tags': meta.get('tags') or [],
                 'note': meta.get('note') or '',
+                'sourceKind': _kind,
+                'sourceKindLabel': _kind_label,
                 'url': meta.get('url') or '',
                 'addedAt': meta.get('addedAt') or datetime.fromtimestamp(
                     audio.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S'),

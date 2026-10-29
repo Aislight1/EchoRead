@@ -365,7 +365,8 @@ def realign_all(audio, cues, asr, ffmpeg, tmpdir, duration, log=None, pause_wait
     if not dur or dur < 2:
         raise RuntimeError('音频时长未知，无法全文重定位')
     if dur > 5400:
-        raise RuntimeError('音频超过 90 分钟，整段重转写定位耗时过长——建议重新生成字幕')
+        raise RuntimeError('音频超过 90 分钟，整段重转写定位耗时过长；'
+                          '长音频请改用 realign_all_chunked（分块重转写，无长度上限）')
     seg = Path(tmpdir) / 'reall.wav'
     if not _cut_segment(ffmpeg, audio, 0, dur, seg):
         raise RuntimeError('截取整段音频失败')
@@ -379,19 +380,54 @@ def realign_all(audio, cues, asr, ffmpeg, tmpdir, duration, log=None, pause_wait
             res = asr.recognize(str(seg), 'en')
     except Exception as e:
         raise RuntimeError('整段重转写失败：' + str(e)[:120])
-    words = res.get('words') or []
-    if not words:
-        raise RuntimeError('重转写没有返回词级时间戳（对齐引擎须为阿里云 paraformer）')
-    asr_words = [{'w': _norm(w.get('text')),
-                  'start': float(w.get('start') or 0),
-                  'end': float(w.get('end') or 0)} for w in words]
-    asr_words = [w for w in asr_words if w['w']]
+    asr_words = _words_from_result(res, 0.0)
     if not asr_words:
-        raise RuntimeError('重转写词流为空')
+        raise RuntimeError('重转写没有返回词级时间戳（对齐引擎须为阿里云 paraformer）')
     if pause_wait:
         pause_wait()
     if log:
         log(f'重转写完成：{len(asr_words)} 个词的时间流，开始逐句定位…')
+    return _realign_apply(cues, asr_words, dur, log)
+
+
+def _words_from_result(res, offset=0.0):
+    """把 ASR 返回的词流归一化，并整体平移到全局时间轴。
+
+    offset 用于分块场景：块内 ASR 返回的是段内相对时间，加上该块音频的
+    绝对起点才能还原成全局时间。归一化（去标点/小写）与全段路径完全一致，
+    否则分块与整段两条路径的对齐行为会出现细微差异。
+    """
+    out = []
+    for w in ((res or {}).get('words') or []):
+        t = _norm(w.get('text'))
+        if not t:
+            continue
+        out.append({'w': t,
+                    'start': float(w.get('start') or 0) + offset,
+                    'end': float(w.get('end') or 0) + offset})
+    return out
+
+
+def _recognize_retry(asr, path, lang='en'):
+    """识别一次，失败重试一次（网络抖动/偶发 5xx 很常见）。"""
+    try:
+        return asr.recognize(str(path), lang)
+    except Exception:
+        time.sleep(1.5)
+        return asr.recognize(str(path), lang)
+
+
+def _realign_apply(cues, asr_words, dur, log=None):
+    """手里已有「全局词时间流」时，把现有字幕文本逐句重新定位到该词流上。
+
+    这是 realign_all / realign_all_chunked 的公共下半段：两条路径唯一的区别
+    在于词流怎么来（整段一次识别 vs 分块识别后拼接），一旦拿到词流，
+    逐句锚定、未锚定插值、单调化的行为必须完全一致，否则修了长音频就会
+    顺手把短音频的行为改掉。
+
+    文本以字幕为准（一个字不动），时间以重转写为准。
+    返回 (cues, stats)，stats 与 align_cues 同构。
+    """
     cue_words = [[_norm(t) for t in re.split(r"\s+", (c.get('text') or '')) if _norm(t)]
                  for c in cues]
     orig_starts = [float(c.get('start') or 0) for c in cues]
@@ -442,3 +478,82 @@ def realign_all(audio, cues, asr, ffmpeg, tmpdir, duration, log=None, pause_wait
             f'其余按词数在锚点间插值')
     return cues, {'total': len(cues), 'aligned': len(anchored),
                   'kept': len(cues) - len(anchored), 'per_cue': per_cue}
+
+
+def realign_all_chunked(audio, cues, asr, ffmpeg, tmpdir, duration, log=None,
+                        pause_wait=None, chunk_sec=480.0, pad=20.0):
+    """realign_all 的分块版：去掉 90 分钟硬上限，长音频也能整段重定位。
+
+    为什么要分块：整段重转写一个 90 分钟以上的文件，单次识别请求会超出
+    服务端的时长/体积上限而直接被拒；即便没超，一次请求失败就要从头再来。
+    分块后每块独立请求、独立重试，坏一块不影响其它块，失败面从「整段」
+    收敛到「某 8 分钟」。
+
+    切块方式：按固定长度切出互不重叠的「责任窗口」[c0, c1)，实际送 ASR 的
+    音频是两侧各外扩 pad 秒的 [c0-pad, c1+pad]。外扩纯粹是为了给窗口边缘的
+    词提供上下文（否则每块头尾各有一两个词会被切坏）；重叠区识别出来的词
+    只收一次 —— 判据是该词的全局 start 落在本块窗口 [c0, c1) 内，落到 pad
+    区的直接丢弃。因此拼接后的全局词流没有重复、也没有缺口。
+
+    块内返回的是段内相对时间，加 (c0 - pad) 还原成全局时间。注意 pad 在
+    0 附近会被截断（a = max(0, c0 - pad)），所以必须用实际的 a 而不是
+    c0 - pad 去做平移，否则第一块会有 20 秒的错误偏移。
+
+    其余逻辑与 realign_all 完全一致（共用 _realign_apply），短音频直接
+    走 realign_all，不多切一刀浪费一次请求。
+    """
+    if not cues:
+        return cues, {'total': 0, 'aligned': 0, 'kept': 0, 'per_cue': []}
+    dur = float(duration or 0)
+    if not dur or dur < 2:
+        raise RuntimeError('音频时长未知，无法全文重定位')
+    if dur <= chunk_sec:
+        return realign_all(audio, cues, asr, ffmpeg, tmpdir, duration,
+                           log=log, pause_wait=pause_wait)
+
+    tmp = Path(tmpdir)
+    cores = []
+    pos = 0.0
+    while pos < dur - 0.05:
+        cores.append((pos, min(dur, pos + chunk_sec)))
+        pos += chunk_sec
+    nseg = len(cores)
+    if log:
+        log(f'长音频 {dur / 60:.1f} 分钟，分 {nseg} 段重转写后逐句定位…')
+
+    asr_words = []
+    for ci, (c0, c1) in enumerate(cores):
+        a = max(0.0, c0 - pad)          # 实际切点（首块会被 0 截断）
+        b = min(dur, c1 + pad)
+        seg = tmp / f'reall_{ci:02d}.wav'
+        if not _cut_segment(ffmpeg, audio, a, b, seg):
+            raise RuntimeError(f'截取第 {ci + 1}/{nseg} 段音频失败')
+        if pause_wait:
+            pause_wait()
+        try:
+            res = _recognize_retry(asr, seg, 'en')
+        except Exception as e:
+            raise RuntimeError(
+                f'第 {ci + 1}/{nseg} 段重转写失败：{str(e)[:120]}')
+        part = _words_from_result(res, a)
+        kept = 0
+        for w in part:
+            if w['start'] < c0 - 0.05:              # 左 pad 区：上一块负责
+                continue
+            if ci < nseg - 1 and w['start'] >= c1 - 0.05:   # 右 pad 区：下一块负责
+                continue
+            asr_words.append(w)
+            kept += 1
+        if log:
+            log(f'  分段 {ci + 1}/{nseg}：识别 {len(part)} 词，本段收 {kept} 词')
+        try:
+            seg.unlink()
+        except OSError:
+            pass
+
+    if not asr_words:
+        raise RuntimeError('分块重转写词流为空（各段都没有返回词级时间戳）')
+    asr_words.sort(key=lambda w: (w['start'], w['end']))
+    if log:
+        log(f'重转写完成：{len(asr_words)} 个词的时间流，开始逐句定位…')
+    return _realign_apply(cues, asr_words, dur, log)

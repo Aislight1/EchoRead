@@ -14,6 +14,18 @@ import time
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
+# MiMo V2.5 全系于 2026-10-21 10:00 (UTC+8) 下线，旧模型名再调用会直接报错。
+# 这些名字保留下来只用于「识别旧配置并给出人话提示」，不再作为默认模型。
+MIMO_RETIRED_MODELS = {
+    'mimo-v2.5-tts',
+    'mimo-v2.5-tts-voiceclone',
+    'mimo-v2.5-tts-voicedesign',
+    'mimo-v2.5-asr',
+}
+MIMO_RETIRED_NOTE = ('MiMo V2.5 全系已于 2026-10-21 下线——请在「设置 → 语音输出」'
+                     '切换到阿里云 qwen3-tts-flash（HTTP 稳定）或 Edge TTS；'
+                     '若 MiMo 已发布 v2.6-tts，可在模型名里手填后保存')
+
 
 def _no_window():
     return getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -102,9 +114,10 @@ PROVIDERS = {
         'mimo': {
             'id': 'mimo', 'label': '小米 MiMo 识别', 'logo': 'M',
             'baseUrl': 'https://api.xiaomimimo.com/v1', 'canPull': False,
-            'builtin': [{'id': 'mimo-v2.5-asr', 'label': 'MiMo-ASR（¥0.5/时·无词级时间戳）'}],
+            'builtin': [{'id': 'mimo-v2.5-asr',
+                         'label': 'MiMo-ASR（V2.5 已下线·请改用 paraformer-realtime-v2）'}],
             'auth': 'key', 'keyHint': '小米 MiMo Key', 'keyName': 'mimoApiKey',
-            'docs': 'https://mimo.xiaomimimo.com/', 'note': '⚠ V2.5 系 2026-10-21 下线',
+            'docs': 'https://mimo.xiaomimimo.com/', 'note': '⛔ V2.5 系已于 2026-10-21 下线；识别请用 paraformer-realtime-v2',
         },
         'doubao': {
             'id': 'doubao', 'label': '火山方舟豆包识别', 'logo': '🔥',
@@ -144,37 +157,62 @@ PROVIDERS = {
                 {'id': 'zh-CN-YunxiNeural', 'label': '云希（中文·男）'},
             ],
             'auth': 'none', 'keyHint': '', 'keyName': '',
-            'docs': 'https://github.com/rany2/edge-tts', 'note': '单词朗读/兜底首选', 'features': [],
+            'docs': 'https://github.com/rany2/edge-tts', 'note': '单词朗读/兜底首选',
+            'defaultModel': 'en-US-AriaNeural', 'features': [],
         },
         'mimo': {
             'id': 'mimo', 'label': '小米 MiMo TTS', 'logo': 'M',
             'baseUrl': 'https://api.xiaomimimo.com/v1', 'canPull': True,
-            'builtin': [
-                {'id': 'mimo-v2.5-tts', 'label': 'V2.5-TTS（风格指令）'},
-                {'id': 'mimo-v2.5-tts-voiceclone', 'label': 'V2.5-VoiceClone（克隆）'},
-                {'id': 'mimo-v2.5-tts-voicedesign', 'label': 'V2.5-VoiceDesign（设计）'},
+            # 2026-10-21 V2.5 全系下线：空 builtin + 空 defaultModel，避免默认再选中死模型。
+            # 旧配置里的 v2.5 名字由 MIMO_RETIRED_MODELS 识别并提示；v2.6-tts 发布后
+            # 用户可直接在「当前引擎模型」里手填，不需要改代码。
+            'defaultModel': '',
+            'builtin': [],
+            'hidden': [
+                {'id': 'mimo-v2.5-tts', 'label': 'V2.5-TTS（已于 2026-10-21 下线）',
+                 'use': '仅作旧配置识别；不要再选，请改用阿里云 Qwen3-TTS 或 Edge'},
             ],
+            'aliases': {
+                'mimo-v2.5-tts-voiceclone': 'mimo-v2.5-tts',
+                'mimo-v2.5-tts-voicedesign': 'mimo-v2.5-tts',
+            },
             'auth': 'key', 'keyHint': '小米 MiMo Key', 'keyName': 'mimoApiKey',
             'docs': 'https://mimo.xiaomimimo.com/docs/usage-guide/speech-synthesis-v2.5',
-            'note': '⚠ V2.5 系 2026-10-21 下线（v2.6 待发布即切）', 'features': ['clone', 'design'],
+            'note': '⛔ V2.5 全系已于 2026-10-21 下线；如已发布 v2.6-tts，请在模型名手填 mimo-v2.6-tts 后保存',
+            'features': [],
         },
         'dashscope': {
             'id': 'dashscope', 'label': '阿里云 Qwen TTS', 'logo': '☁️',
             'baseUrl': 'https://dashscope.aliyuncs.com/api/v1', 'canPull': True,
             'pullBaseUrl': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            # #8 模型目录收敛：下拉/芯片只列「每代最新」3 个。
+            # 旧代与实测 411 不可用的模型全部折叠进 aliases（保留可解析）：
+            # 老配置里的旧模型名在 resolve/synthesize 时自动映射到最新等价模型并打一条日志，
+            # 不会被清空、也不会拿旧名去打请求报 411。
+            'defaultModel': 'qwen3-tts-flash',
             'builtin': [
-                {'id': 'qwen-audio-3.0-tts-flash', 'label': 'Qwen-Audio-3.0-TTS-Flash（❌实测411不可用·换qwen3/cosyvoice）'},
-                {'id': 'cosyvoice-v3-flash', 'label': 'CosyVoice-V3-Flash（✓专用口·快·90音色）'},
-                {'id': 'qwen3-tts-flash', 'label': 'Qwen3-TTS-Flash（multimodal口·48音色·0.8元/万字符）'},
-                {'id': 'qwen-audio-3.1-tts-flash', 'label': 'Qwen-Audio-3.1-TTS-Flash（❌实测411不可用·换qwen3/cosyvoice）'},
-                {'id': 'qwen-audio-3.0-tts-plus', 'label': 'Qwen-Audio-3.0-TTS-Plus（❌实测411不可用·换qwen3/cosyvoice）'},
-                {'id': 'cosyvoice-v3.5-flash', 'label': 'CosyVoice-V3.5-Flash（专用口·仅复刻/设计音色）'},
-                {'id': 'cosyvoice-v3-plus', 'label': 'CosyVoice-V3-Plus（专用口）'},
-                {'id': 'cosyvoice-v2', 'label': 'CosyVoice-V2（专用口·老稳定）'},
-                {'id': 'MiniMax/speech-2.8-hd', 'label': 'MiniMax-Speech-2.8-HD（multimodal口·高音质）'},
-                {'id': 'MiniMax/speech-2.8-turbo', 'label': 'MiniMax-Speech-2.8-Turbo（multimodal口·快）'},
-                {'id': 'qwen-audio-3.1-tts-next', 'label': 'Qwen-Audio-3.1-TTS-Next（❌实测411不可用·换qwen3/cosyvoice）'},
+                {'id': 'qwen3-tts-flash', 'label': 'Qwen3-TTS-Flash（最新·HTTP 稳定）',
+                 'use': '英文跟读 / 单词 / 短文首选：16 个系统音色，非流式 HTTP 口最稳'},
+                {'id': 'cosyvoice-v3-flash', 'label': 'CosyVoice-V3-Flash（最新·专用口）',
+                 'use': '要用 CosyVoice 音色库（longan 系 12 音色）或要更低延迟时用'},
+                {'id': 'MiniMax/speech-2.8-hd', 'label': 'MiniMax-Speech-2.8-HD（最新·高音质）',
+                 'use': '影视级音质与情绪表现，单价最高，只有 1 个系统音色'},
             ],
+            # 仍可合成、但不再出现在下拉里的（同代快速档）
+            'hidden': [
+                {'id': 'MiniMax/speech-2.8-turbo', 'label': 'MiniMax-Speech-2.8-Turbo（同代快速档·隐藏）',
+                 'use': '同代 2.8 的快速便宜档，功能正常，只是不占下拉位'},
+            ],
+            # 旧代 / 实测不可用 → 最新等价模型
+            'aliases': {
+                'qwen-audio-3.0-tts-flash': 'qwen3-tts-flash',
+                'qwen-audio-3.0-tts-plus': 'qwen3-tts-flash',
+                'qwen-audio-3.1-tts-flash': 'qwen3-tts-flash',
+                'qwen-audio-3.1-tts-next': 'qwen3-tts-flash',
+                'cosyvoice-v3-plus': 'cosyvoice-v3-flash',
+                'cosyvoice-v2': 'cosyvoice-v3-flash',
+                'cosyvoice-v3.5-flash': 'cosyvoice-v3-flash',
+            },
             # 按模型系的音色清单（音色绑定模型，跨系=Engine411；前端音色下拉/校验用）
             'voices': {
                 'qwen3': ['Cherry', 'Serena', 'Ethan', 'Maia', 'Chelsie', 'Momo', 'Kai', 'Nofish',
@@ -184,10 +222,17 @@ PROVIDERS = {
                                'longjielidou_v3.6', 'longpaopao_v3.6', 'longhuohuo_v3.6', 'longchuanshu_v3.6'],
                 'minimax': ['male-qn-qingse'],
             },
+            'voiceNotes': {
+                'qwen3': 'Qwen3 系 16 个系统音色（中英通用：Cherry/Serena/Ethan/Maia…）',
+                'qwen-audio': 'CosyVoice / qwen-audio 系 longan 12 音色（中文为主）',
+                'minimax': 'MiniMax 系只有 1 个系统音色（male-qn-qingse）',
+            },
             'baseUrlNote': '默认百炼；用千问AI平台时在高级里填 dashscopeBaseUrl=https://maas.qianwenaiapi.com',
             'auth': 'key', 'keyHint': '阿里云百炼/千问AI平台 API Key', 'keyName': 'dashscopeApiKey',
             'docs': 'https://help.aliyun.com/zh/model-studio/',
-            'note': '自动路由：qwen-audio/cosyvoice 系（含 tts-next）WS 实时优先·HTTP 回落；qwen3/MiniMax 走 multimodal 口；⟳拉取只列已开通模型，内置表是全景', 'features': [],
+            'note': '自动路由：qwen3/MiniMax 走 multimodal 口，cosyvoice/qwen-audio 系 WS 实时优先·HTTP 回落；'
+                    '目录只列最新一代（3 个），旧模型名自动映射',
+            'features': [],
         },
         'volc': {
             'id': 'volc', 'label': '火山方舟豆包 TTS', 'logo': '🔥',
@@ -212,6 +257,167 @@ PROVIDERS = {
         },
     },
 }
+
+
+# ================= TTS 模型/音色目录（#8：每代只留最新 + 旧名自动映射） =================
+# 场景 id 的单一来源。前端「场景级引擎覆盖」下拉的键必须和真正调用
+# tts_speak(scene=…) 的地方一致，否则覆盖永远不生效——历史 bug：UI 列的是
+# listen/play，唯一传 scene 的调用处用的是 practice（见 app.tts_speak_batch）。
+TTS_SCENES = [
+    {'id': 'listen', 'name': '听力朗读', 'desc': '听力页「听原声 / 听 AI 朗读」'},
+    {'id': 'play', 'name': '跟读播放', 'desc': '跟读页参考音播放'},
+    {'id': 'practice', 'name': '练习批处理', 'desc': '逐句练习批量合成（tts_speak_batch）'},
+]
+
+
+def _tts_pdef(pid):
+    """TTS 供应商定义（未知 pid 落 custom，避免 KeyError 冒到界面上）。"""
+    tts = PROVIDERS.get('tts') or {}
+    return tts.get(pid) or tts.get('custom') or {}
+
+
+# 「⟳ 拉模型」结果里，算得上语音合成模型的型号关键字（其余是 chat/asr/embedding/rerank）
+_TTS_MODEL_HINTS = ('tts', 'cosyvoice', 'speech-', 'seed-tts', 'mimo', 'sambert')
+
+
+def tts_default_model(pid):
+    """该供应商「应该默认用」的模型：显式 defaultModel > 内置清单第一个。"""
+    p = _tts_pdef(pid)
+    m = (p.get('defaultModel') or '').strip()
+    if m:
+        return m
+    return next((b.get('id') for b in (p.get('builtin') or []) if b.get('id')), '')
+
+
+def tts_family(pid, model):
+    """模型属于哪个音色系（= voices 字典的键）。跨系传音色会被拒 Engine411。"""
+    m = (model or '').lower()
+    if pid == 'edge':
+        return 'edge'
+    if pid == 'dashscope':
+        if m.startswith('minimax') or '/' in m:
+            return 'minimax'
+        if 'cosyvoice' in m or 'qwen-audio' in m:
+            return 'qwen-audio'
+        return 'qwen3'
+    return pid
+
+
+def tts_models(pid, include_hidden=False):
+    """该供应商的 TTS 模型目录（最新的在前）。每项带一句话用途 use 与 hidden/latest 标记。"""
+    p = _tts_pdef(pid)
+    out = []
+    for b in (p.get('builtin') or []):
+        if not b.get('id'):
+            continue
+        out.append({'id': b['id'], 'label': b.get('label') or b['id'],
+                    'use': b.get('use') or '', 'hidden': False,
+                    'latest': b['id'] == (p.get('defaultModel') or ''),
+                    'family': tts_family(pid, b['id'])})
+    if include_hidden:
+        for b in (p.get('hidden') or []):
+            if not b.get('id'):
+                continue
+            out.append({'id': b['id'], 'label': b.get('label') or b['id'],
+                        'use': b.get('use') or '', 'hidden': True, 'latest': False,
+                        'family': tts_family(pid, b['id'])})
+    return out
+
+
+def tts_canonical_model(pid, model):
+    """旧模型名 → 最新等价模型。返回 (model, note)。
+
+    note 非空表示发生了映射，调用方应当打一条日志（老配置静默换模型最难排查）。
+    """
+    m = (model or '').strip()
+    if not m:
+        return tts_default_model(pid), ''
+    # MiMo V2.5：名字仍可解析，但不再映射到另一个死模型；返回空模型让上层给出
+    # 「已下线，请切换引擎」的明确错误，而不是拿旧名去打请求收 404/模型不存在。
+    if str(pid).lower() == 'mimo' and m.lower() in {x.lower() for x in MIMO_RETIRED_MODELS}:
+        return '', MIMO_RETIRED_NOTE
+    al = (_tts_pdef(pid).get('aliases') or {})
+    if m in al:
+        return al[m], f'模型「{m}」是旧代/不可用，已自动映射到最新等价模型「{al[m]}」'
+    low = {str(k).lower(): v for k, v in al.items()}
+    if m.lower() in low:                       # 大小写/空格兜底
+        v = low[m.lower()]
+        return v, f'模型「{m}」是旧代/不可用，已自动映射到最新等价模型「{v}」'
+    return m, ''
+
+
+def tts_voices(pid, model=None, with_default=True):
+    """该模型系的音色清单。with_default=True 时第一项是「默认/留空」。
+
+    · edge 没有模型概念：直接把内置神经音当音色；
+    · dashscope 按模型系返回（跨系会 411，所以只列本系）；
+    · mimo/volc/siliconflow/custom 没有固定音色目录 → 返回 []，由 TTS 层用风格预设兜底。
+    """
+    if pid == 'edge':
+        items = [{'id': b['id'], 'label': b.get('label') or b['id'], 'family': 'edge',
+                  'group': 'Edge 神经音'} for b in (_tts_pdef('edge').get('builtin') or [])]
+        if with_default:
+            items.insert(0, {'id': '', 'label': '默认（Aria 美音女）',
+                             'family': 'edge', 'group': '默认'})
+        return items
+    p = _tts_pdef(pid)
+    fam = tts_family(pid, model or tts_default_model(pid))
+    raw = (p.get('voices') or {}).get(fam) or []
+    if not raw:
+        return []
+    note = (p.get('voiceNotes') or {}).get(fam) or ''
+    items = [{'id': v, 'label': v, 'family': fam, 'group': f'{fam} 系', 'desc': note}
+             for v in raw]
+    if with_default:
+        items.insert(0, {'id': '', 'label': f'默认（{raw[0]}）', 'family': fam,
+                         'group': '默认', 'desc': note})
+    return items
+
+
+def tts_pick_voice(pid, model, voice):
+    """把音色收敛到「属于当前模型系」的合法值。返回 (voice, note)。
+
+    音色绑定模型系：拿 cosyvoice 模型配 Cherry、或拿 qwen3 模型配 longanyang 都会
+    Engine411。这里统一回退到该系默认音色，并把原因写进 note 让调用方打日志
+    （静默换音色就是「试听听起来还是上一个音色」的观感来源之一）。
+    """
+    fam = tts_family(pid, model)
+    raw = (_tts_pdef(pid).get('voices') or {}).get(fam) or []
+    if not raw:                                 # 没有固定音色目录的供应商：原样放行
+        return (voice or '').strip(), ''
+    v = (voice or '').strip()
+    if v in raw:
+        return v, ''
+    if v:
+        return raw[0], (f'音色「{v}」不属于 {model} 的 {fam} 系（跨系会报 Engine411），'
+                        f'已回退到该系默认音色「{raw[0]}」')
+    return raw[0], f'没选音色，用 {fam} 系默认音色「{raw[0]}」'
+
+
+def filter_pulled_models(pid, models):
+    """「⟳ 拉模型」的结果过滤：语音输出的模型下拉只该看见能合成的东西。
+
+    · 拉回来的列表是 OpenAI 兼容口 /models，会把 chat/asr/embedding/rerank/realtime
+      全混进来（前端曾把整份拉取结果直接灌进 datalist，选到 asr 模型必然报错）；
+    · 只留 tts 系关键字；注册表里有内置目录的供应商（dashscope/mimo/volc/siliconflow），
+      以内置最新一代为准——网关还返回旧代也不列（#8 的约束在拉取路径上同样成立）。
+    返回 (models, note)。
+    """
+    raw = [str(m).strip() for m in (models or []) if str(m).strip()]
+    keep = [m for m in raw if any(k in m.lower() for k in _TTS_MODEL_HINTS)]
+    p = _tts_pdef(pid)
+    curated = [b.get('id') for b in (p.get('builtin') or []) if b.get('id')]
+    if curated:
+        merged = list(curated)
+        shown = set(curated) | {x['id'] for x in tts_models(pid, include_hidden=True)}
+        for m in keep:
+            if m not in merged and tts_canonical_model(pid, m)[0] not in shown:
+                merged.append(m)          # 网关新冒出来的型号才补进来（老型号被 aliases 拦掉）
+        note = f'已按内置最新目录收敛为 {len(merged)} 个（排除了 {len(raw) - len(keep)} 个非语音模型）'
+        return merged, note
+    if keep:
+        return keep, f'已过滤掉 {len(raw) - len(keep)} 个非语音模型'
+    return raw, '网关没返回可识别的语音模型，保留原列表'
 
 
 # ================= 用户覆盖解析（兼容两代存法） =================
@@ -256,23 +462,26 @@ def resolve_llm_endpoint(cfg, pid):
 
 def resolve_tts_endpoint(cfg, provider_id=None):
     """解析 TTS 端点。mimo 保持旧行为（mimoApiKey/mimoBaseUrl/mimoTtsModel）；
-    其余：speechProviders/customProviders 覆盖 > 注册表预置。"""
+    其余：speechProviders/customProviders 覆盖 > 注册表预置。
+    model 一定是「最新一代」：旧名经 aliases 自动映射（#8），绝不返回空串或已下线模型。"""
     pid = provider_id or cfg.get('ttsProvider') or 'mimo'
     if pid == 'mimo':
         uc = _user_override(cfg, 'tts', pid)
+        model, _n = tts_canonical_model('mimo', uc['model'] or cfg.get('mimoTtsModel') or '')
         return {
             'provider': 'mimo',
             'baseUrl': uc['baseUrl'] or cfg.get('mimoBaseUrl') or 'https://api.xiaomimimo.com/v1',
             'apiKey': uc['apiKey'] or cfg.get('mimoApiKey') or '',
-            'model': uc['model'] or cfg.get('mimoTtsModel') or 'mimo-v2.5-tts',
+            'model': model,
         }
     pdef = PROVIDERS['tts'].get(pid) or PROVIDERS['tts']['custom']
     uc = _user_override(cfg, 'tts', pid)
+    model, _n = tts_canonical_model(pid, uc['model'] or tts_default_model(pid))
     return {
         'provider': pid,
         'baseUrl': uc['baseUrl'] or pdef.get('baseUrl', ''),
         'apiKey': uc['apiKey'] or _key_of(cfg, pdef, pid),
-        'model': uc['model'] or (pdef.get('builtin') or [{}])[0].get('id', ''),
+        'model': model,
     }
 
 
@@ -415,11 +624,38 @@ def speed_test_tts(pid, base_url, api_key, model, ffmpeg=None):
     if pid == 'dashscope':
         if not api_key:
             raise RuntimeError('缺少 DashScope API Key')
+        # 测速也要走「最新一代 + 同系音色」：旧实现硬编码 qwen-audio-3.1-tts-flash
+        # （已被 aliases 折叠、且配 Cherry 必 411），测出来的永远是失败。
+        _m, _n = tts_canonical_model('dashscope', (model or '').strip() or tts_default_model('dashscope'))
+        _v, _note = tts_pick_voice('dashscope', _m, '')
+        if tts_family('dashscope', _m) != 'qwen-audio':
+            # qwen3 / MiniMax 系只在 multimodal HTTP 口上（WS 的 tts_v2 SDK 不认它们），
+            # 用同一份请求体口径探一次真合成。
+            import json as _json
+            from urllib.request import Request, urlopen
+            host = (base_url or 'https://dashscope.aliyuncs.com').rstrip('/')
+            host = host[:-len('/api/v1')] if host.endswith('/api/v1') else host
+            url = host + '/api/v1/services/aigc/multimodal-generation/generation'
+            if tts_family('dashscope', _m) == 'minimax':
+                inp = {'text': 'ok', 'voice_setting': {'voice_id': _v}}
+            else:
+                inp = {'text': 'ok', 'voice': _v, 'language_type': 'English'}
+            body = _json.dumps({'model': _m, 'input': inp}).encode('utf-8')
+            req = Request(url, data=body, method='POST',
+                          headers={'Authorization': f'Bearer {api_key}',
+                                   'Content-Type': 'application/json'})
+            t0 = time.perf_counter()
+            with urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+            ms = int((time.perf_counter() - t0) * 1000)
+            if not raw:
+                raise RuntimeError('未返回音频')
+            return ms, True
         import dashscope
         dashscope.api_key = api_key
         from dashscope.audio.tts_v2 import SpeechSynthesizer
         t0 = time.perf_counter()
-        synth = SpeechSynthesizer(model=model or 'qwen-audio-3.1-tts-flash', voice='Cherry')
+        synth = SpeechSynthesizer(model=_m, voice=_v)
         res = synth.call(text='ok')
         ms = int((time.perf_counter() - t0) * 1000)
         audio = res.get_audio_data() if hasattr(res, 'get_audio_data') else None
@@ -444,8 +680,13 @@ def err_hint(model, msg, kind='tts'):
     m = str(msg or '')
     low = (str(model or '') + ' ' + m).lower()
     hints = []
+    if 'mimo' in low and ('v2.5' in low or 'not found' in low
+                          or 'does not exist' in low or 'invalid' in low):
+        hints.append(MIMO_RETIRED_NOTE)
     if 'cosyvoice' in low or 'engine error' in low or '[411]' in m:
-        hints.append('该模型/音色在合成口被拒（qwen-audio 系 TTS 实测本账号 411 全不可用）——换 qwen3-tts-flash（HTTP 稳定）或 cosyvoice-v3-flash（WS 稳定）')
+        hints.append('该模型/音色在合成口被拒（Engine411 = 音色不属于该模型系）——'
+                     '换 qwen3-tts-flash（HTTP 稳定）或 cosyvoice-v3-flash（WS 稳定）；'
+                     '音色会自动收敛到所选模型的那一系')
     if 'url error' in low or 'please check url' in low:
         hints.append('该模型可能不在此接口上（qwen-audio-3.1 系已走 WS 实时通道并自动回落 HTTP；仍报错多为账号未开通该模型）'
                      '——下拉默认的 qwen3-tts-flash 是已验证稳定款')

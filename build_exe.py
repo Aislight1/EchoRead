@@ -12,10 +12,12 @@ r"""
 产物:
   dist\听与读\听与读.exe
 """
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 APP = Path(__file__).resolve().parent
@@ -60,7 +62,7 @@ def stash_user_data(out: Path) -> Path:
     skip_cfg = False
     if src_cfg.exists() and prev_cfg.exists():
         if not _cfg_keys(src_cfg) and _cfg_keys(prev_cfg):
-            print('  ⚠ 检出无任何 API key 的空壳 config（疑似误删后自动重建），跳过暂存、沿用上一轮快照')
+            print('  [!] 检出无任何 API key 的空壳 config（疑似误删后自动重建），跳过暂存、沿用上一轮快照')
             shutil.copy2(prev_cfg, stash / 'config.json')
             skip_cfg = True
 
@@ -72,7 +74,7 @@ def stash_user_data(out: Path) -> Path:
         if not src.exists():
             if (prev / name).exists():
                 shutil.copy2(prev / name, stash / name)
-                print(f'  ⚠ {name} 输出目录已缺失，沿用上一轮快照')
+                print(f'  [!] {name} 输出目录已缺失，沿用上一轮快照')
             continue
         shutil.copy2(src, stash / name)
         print(f'  已暂存 {name}')
@@ -119,7 +121,7 @@ def restore_user_data(out: Path, stash: Path):
             except Exception:
                 return False
         if not _kk(cfg_now) and _kk(cfg_prev):
-            print('  ⚠⚠ 恢复后 config 是空壳！已用上一轮快照兜底')
+            print('  ⚠[!] 恢复后 config 是空壳！已用上一轮快照兜底')
             shutil.copy2(cfg_prev, cfg_now)
     libbak = stash / '__library__'
     if libbak.exists():
@@ -218,7 +220,7 @@ def main():
         try:
             sync_into(build_src, out)
         except Exception as e:
-            print(f'  ⚠ 同步中断（{e}）——数据恢复优先执行')
+            print(f'  [!] 同步中断（{e}）——数据恢复优先执行')
         shutil.rmtree(APP / 'build_dist', ignore_errors=True)
     if stash is not None:
         print('恢复用户数据…')
@@ -231,6 +233,44 @@ def main():
     if not exe.exists():
         print('打包失败：未生成 exe')
         return 1
+
+    # ① 硬校验：dist 里的 ui/index.html 必须与源码逐字节相同。
+    # 2026-10-18 复盘：用户报「LLM 纠音没有、并上句还是错的」，实际跑的是 10/15 的
+    # dist，源码 10/17 早修好了——打包时 ui 没同步/没重打，界面上无法自证版本。
+    # 这里直接比对字节，不一致就让构建失败（返回 3），不给"以为改好了"留余地。
+    try:
+        src_ui = (APP / 'ui' / 'index.html').read_bytes()
+        for cand in (out / '_internal' / 'ui' / 'index.html', out / 'ui' / 'index.html'):
+            if cand.exists():
+                if cand.read_bytes() == src_ui:
+                    print(f'  [OK] ui/index.html 与源码一致（{len(src_ui)} 字节）')
+                else:
+                    print('  [X] dist 里的 ui/index.html 与源码不一致 → 构建作废')
+                    print(f'    源码: {APP / "ui" / "index.html"}')
+                    print(f'    包内: {cand}')
+                    return 3
+                break
+    except Exception as e:
+        print(f'  [!] ui 校验跳过（{e}）')
+
+    # ② 构建指纹：把时间 + 源码内容哈希写进 dist，界面「关于/设置」直接显示。
+    # 以后任何「我明明改了却没生效」的疑问，先看这行字即可定位是不是跑了旧包。
+    try:
+        h = hashlib.md5()
+        for rel in ('app.py', 'ui/index.html', 'videosrc.py', 'speech_asr.py', 'speech_tts.py'):
+            p = APP / rel
+            if p.exists():
+                h.update(rel.encode('utf-8'))
+                h.update(p.read_bytes())
+        stamp = f'{datetime.now().strftime("%Y-%m-%d %H:%M")} · {h.hexdigest()[:8]}'
+        info = {'builtAt': stamp, 'stamp': stamp, 'source': str(APP), 'exe': f'{NAME}.exe'}
+        blob = json.dumps(info, ensure_ascii=False, indent=1)
+        (out / 'build_info.json').write_text(blob, encoding='utf-8')
+        (out / '_internal').mkdir(parents=True, exist_ok=True)
+        (out / '_internal' / 'build_info.json').write_text(blob, encoding='utf-8')
+        print(f'  [OK] 构建指纹：{stamp}')
+    except Exception as e:
+        print(f'  [!] 构建指纹写入失败（{e}）')
 
     print()
 
